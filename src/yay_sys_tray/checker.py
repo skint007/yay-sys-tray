@@ -17,25 +17,38 @@ class UpdateChecker(QThread):
 
     def run(self):
         try:
-            result = subprocess.run(
-                ["yay", "-Qu"],
+            updates = []
+
+            # checkupdates syncs a temp database copy, so results are always fresh
+            repo = subprocess.run(
+                ["checkupdates"],
                 capture_output=True,
                 text=True,
                 timeout=120,
             )
-            # yay/pacman: exit 0 = updates available, exit 1 = no updates
-            if result.returncode == 1 and not result.stdout.strip():
-                self.check_complete.emit([])
-                return
-            if result.returncode not in (0, 1):
+            # checkupdates: exit 0 = updates, exit 2 = no updates, exit 1 = error
+            if repo.returncode == 1:
                 self.check_error.emit(
-                    f"yay exited with code {result.returncode}: {result.stderr.strip()}"
+                    f"checkupdates error: {repo.stderr.strip()}"
                 )
                 return
-            updates = self._parse_output(result.stdout)
+            if repo.returncode == 0:
+                updates.extend(self._parse_output(repo.stdout))
+
+            # Check AUR packages separately via yay
+            aur = subprocess.run(
+                ["yay", "-Qua"],
+                capture_output=True,
+                text=True,
+                timeout=120,
+            )
+            # yay -Qua: exit 0 = updates, exit 1 = no updates
+            if aur.returncode == 0 and aur.stdout.strip():
+                updates.extend(self._parse_output(aur.stdout))
+
             self.check_complete.emit(updates)
-        except FileNotFoundError:
-            self.check_error.emit("yay not found. Is it installed?")
+        except FileNotFoundError as e:
+            self.check_error.emit(f"Command not found: {e.filename}")
         except subprocess.TimeoutExpired:
             self.check_error.emit("Update check timed out after 120 seconds")
         except Exception as e:
