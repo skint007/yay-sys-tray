@@ -1,6 +1,6 @@
 # Maintainer: skint007
 pkgname=yay-sys-tray-git
-pkgver=r5.6439538
+pkgver=r6.023e33a
 pkgrel=1
 pkgdesc="Arch Linux system tray update checker using yay"
 arch=('any')
@@ -28,5 +28,6 @@ package() {
     python -m installer --destdir="$pkgdir" dist/*.whl
 
     install -Dm644 resources/yay-sys-tray.desktop "$pkgdir/usr/share/applications/yay-sys-tray.desktop"
+    install -Dm644 resources/yay-sys-tray.service "$pkgdir/usr/lib/systemd/user/yay-sys-tray.service"
     install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
 }
