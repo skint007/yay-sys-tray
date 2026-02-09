@@ -147,14 +147,20 @@ class TrayApp(QObject):
         # Build tooltip
         lines = []
         if self.remote_updates:
-            if local_count:
-                lines.append(f"Local: {local_count} update(s)")
-            for host in remote_hosts_with_updates:
-                lines.append(f"{host.hostname}: {len(host.updates)} update(s)")
-            if remote_errors:
-                lines.append(f"{len(remote_errors)} host(s) unreachable")
-            if not lines:
-                lines.append("All systems up to date")
+            local_label = f"Local: {local_count} update(s)"
+            if result.needs_restart:
+                local_label += " (restart)"
+            lines.append(local_label)
+            for host in self.remote_updates:
+                if host.error:
+                    lines.append(f"{host.hostname}: unreachable")
+                elif host.updates:
+                    label = f"{host.hostname}: {len(host.updates)} update(s)"
+                    if host.needs_restart:
+                        label += " (restart)"
+                    lines.append(label)
+                else:
+                    lines.append(f"{host.hostname}: up to date")
         else:
             if total_count == 0:
                 lines.append("System up to date")
