@@ -24,6 +24,10 @@ class AppConfig:
     terminal: str = ""
     noconfirm: bool = False
     autostart: bool = False
+    # Tailscale remote checking
+    tailscale_enabled: bool = False
+    tailscale_tags: str = "tag:server,tag:arch"
+    tailscale_timeout: int = 10
 
     def __post_init__(self):
         if not self.terminal:
