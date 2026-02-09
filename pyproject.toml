@@ -1,0 +1,18 @@
+[build-system]
+requires = ["setuptools>=75.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "yay-sys-tray"
+version = "0.1.0"
+description = "Arch Linux system tray update checker using yay"
+requires-python = ">=3.12"
+dependencies = [
+    "PyQt6",
+]
+
+[project.scripts]
+yay-sys-tray = "yay_sys_tray.__main__:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
