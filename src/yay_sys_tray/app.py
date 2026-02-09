@@ -159,7 +159,7 @@ class TrayApp(QObject):
     def show_updates_dialog(self):
         from yay_sys_tray.dialogs import UpdatesDialog
 
-        dialog = UpdatesDialog(self.updates)
+        dialog = UpdatesDialog(self.updates, on_update=self.launch_update)
         dialog.exec()
 
     def show_settings_dialog(self):
