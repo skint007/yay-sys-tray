@@ -1,6 +1,6 @@
 # Maintainer: skint007
 pkgname=yay-sys-tray-git
-pkgver=r9.1ea0395
+pkgver=r10.ab1981a
 pkgrel=1
 pkgdesc="Arch Linux system tray update checker using yay"
 arch=('any')
