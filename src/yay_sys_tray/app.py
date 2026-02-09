@@ -15,12 +15,12 @@ from yay_sys_tray.icons import (
     create_updates_icon,
 )
 
-TERMINAL_ARGS = {
-    "kitty": ["kitty", "--hold", "yay", "-Syu"],
-    "konsole": ["konsole", "--hold", "-e", "yay", "-Syu"],
-    "alacritty": ["alacritty", "--hold", "-e", "yay", "-Syu"],
-    "foot": ["foot", "--hold", "yay", "-Syu"],
-    "xterm": ["xterm", "-hold", "-e", "yay", "-Syu"],
+TERMINAL_CMDS = {
+    "kitty": ["kitty", "--hold"],
+    "konsole": ["konsole", "--hold", "-e"],
+    "alacritty": ["alacritty", "--hold", "-e"],
+    "foot": ["foot", "--hold"],
+    "xterm": ["xterm", "-hold", "-e"],
 }
 
 
@@ -150,8 +150,11 @@ class TrayApp(QObject):
 
     def launch_update(self):
         terminal = self.config.terminal
-        cmd = TERMINAL_ARGS.get(terminal, [terminal, "-e", "yay", "-Syu"])
-        subprocess.Popen(cmd)
+        yay_cmd = ["yay", "-Syu"]
+        if self.config.noconfirm:
+            yay_cmd.append("--noconfirm")
+        prefix = TERMINAL_CMDS.get(terminal, [terminal, "-e"])
+        subprocess.Popen(prefix + yay_cmd)
 
     def show_updates_dialog(self):
         from yay_sys_tray.dialogs import UpdatesDialog

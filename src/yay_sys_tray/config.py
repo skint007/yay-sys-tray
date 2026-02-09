@@ -1,23 +1,13 @@
 import json
 import shutil
+import subprocess
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
 CONFIG_DIR = Path.home() / ".config" / "yay-sys-tray"
 CONFIG_FILE = CONFIG_DIR / "config.json"
 
-DESKTOP_ENTRY = """\
-[Desktop Entry]
-Type=Application
-Name=Yay Update Checker
-Comment=System tray update checker for Arch Linux
-Exec=yay-sys-tray
-Icon=system-software-update
-Terminal=false
-Categories=System;
-StartupNotify=false
-X-GNOME-Autostart-enabled=true
-"""
+SERVICE_NAME = "yay-sys-tray.service"
 
 
 def _detect_terminal() -> str:
@@ -32,6 +22,7 @@ class AppConfig:
     check_interval_minutes: int = 60
     notify: str = "new_only"  # "always" | "new_only" | "never"
     terminal: str = ""
+    noconfirm: bool = False
     autostart: bool = False
 
     def __post_init__(self):
@@ -55,10 +46,8 @@ class AppConfig:
         CONFIG_FILE.write_text(json.dumps(asdict(self), indent=2) + "\n")
 
     def manage_autostart(self) -> None:
-        autostart_dir = Path.home() / ".config" / "autostart"
-        desktop_file = autostart_dir / "yay-sys-tray.desktop"
-        if self.autostart:
-            autostart_dir.mkdir(parents=True, exist_ok=True)
-            desktop_file.write_text(DESKTOP_ENTRY)
-        elif desktop_file.exists():
-            desktop_file.unlink()
+        action = "enable" if self.autostart else "disable"
+        subprocess.run(
+            ["systemctl", "--user", action, SERVICE_NAME],
+            capture_output=True,
+        )
