@@ -21,12 +21,14 @@ from PyQt6.QtWidgets import (
 
 from yay_sys_tray.checker import RESTART_PACKAGES, UpdateInfo
 from yay_sys_tray.config import AppConfig
+from yay_sys_tray.icons import create_app_icon
 
 
 class SettingsDialog(QDialog):
     def __init__(self, config: AppConfig, parent=None):
         super().__init__(parent)
         self.setWindowTitle("Yay Update Checker - Settings")
+        self.setWindowIcon(create_app_icon())
         self.setMinimumWidth(350)
 
         layout = QFormLayout(self)
@@ -239,6 +241,7 @@ class UpdatesDialog(QDialog):
         super().__init__(parent)
         self.on_update = on_update
         self.setWindowTitle(f"Available Updates ({len(updates)})")
+        self.setWindowIcon(create_app_icon())
         self.setMinimumSize(300, 300)
 
         layout = QVBoxLayout(self)
@@ -248,6 +251,10 @@ class UpdatesDialog(QDialog):
         self.list_widget.setItemDelegate(UpdateItemDelegate(self.list_widget))
         self.list_widget.setSelectionMode(QListWidget.SelectionMode.NoSelection)
         self.list_widget.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.list_widget.setHorizontalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOff
+        )
+        self.list_widget.setResizeMode(QListWidget.ResizeMode.Adjust)
         self.list_widget.setStyleSheet("QListWidget { background: transparent; border: none; }")
         self.list_widget.setSpacing(2)
 
