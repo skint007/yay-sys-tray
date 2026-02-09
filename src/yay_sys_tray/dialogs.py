@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 from typing import Callable
 
 from PyQt6.QtCore import QRectF, QSize, Qt
@@ -16,7 +18,9 @@ from PyQt6.QtWidgets import (
     QSpinBox,
     QStyledItemDelegate,
     QStyleOptionViewItem,
+    QTabWidget,
     QVBoxLayout,
+    QWidget,
 )
 
 from yay_sys_tray.checker import RESTART_PACKAGES, UpdateInfo
@@ -29,38 +33,73 @@ class SettingsDialog(QDialog):
         super().__init__(parent)
         self.setWindowTitle("Yay Update Checker - Settings")
         self.setWindowIcon(create_app_icon())
-        self.setMinimumWidth(350)
+        self.setMinimumWidth(400)
 
-        layout = QFormLayout(self)
+        layout = QVBoxLayout(self)
+
+        tabs = QTabWidget()
+        layout.addWidget(tabs)
+
+        # --- General Tab ---
+        general_widget = QWidget()
+        general_layout = QFormLayout(general_widget)
 
         self.interval_spin = QSpinBox()
         self.interval_spin.setRange(5, 1440)
         self.interval_spin.setSuffix(" minutes")
         self.interval_spin.setValue(config.check_interval_minutes)
-        layout.addRow("Check interval:", self.interval_spin)
+        general_layout.addRow("Check interval:", self.interval_spin)
 
         self.notify_combo = QComboBox()
         self.notify_combo.addItems(["always", "new_only", "never"])
         self.notify_combo.setCurrentText(config.notify)
-        layout.addRow("Notifications:", self.notify_combo)
+        general_layout.addRow("Notifications:", self.notify_combo)
 
         self.terminal_edit = QLineEdit(config.terminal)
-        layout.addRow("Terminal:", self.terminal_edit)
+        general_layout.addRow("Terminal:", self.terminal_edit)
 
         self.noconfirm_check = QCheckBox("Skip confirmation prompts")
         self.noconfirm_check.setChecked(config.noconfirm)
-        layout.addRow("--noconfirm:", self.noconfirm_check)
+        general_layout.addRow("--noconfirm:", self.noconfirm_check)
 
         self.autostart_check = QCheckBox("Start on login")
         self.autostart_check.setChecked(config.autostart)
-        layout.addRow("Autostart:", self.autostart_check)
+        general_layout.addRow("Autostart:", self.autostart_check)
 
+        tabs.addTab(general_widget, "General")
+
+        # --- Tailscale Tab ---
+        tailscale_widget = QWidget()
+        tailscale_layout = QFormLayout(tailscale_widget)
+
+        self.tailscale_enabled_check = QCheckBox("Check remote servers via Tailscale")
+        self.tailscale_enabled_check.setChecked(config.tailscale_enabled)
+        tailscale_layout.addRow("Enable:", self.tailscale_enabled_check)
+
+        self.tailscale_tags_edit = QLineEdit(config.tailscale_tags)
+        self.tailscale_tags_edit.setPlaceholderText("tag:server,tag:arch")
+        tailscale_layout.addRow("Device tags:", self.tailscale_tags_edit)
+
+        self.tailscale_timeout_spin = QSpinBox()
+        self.tailscale_timeout_spin.setRange(5, 60)
+        self.tailscale_timeout_spin.setSuffix(" seconds")
+        self.tailscale_timeout_spin.setValue(config.tailscale_timeout)
+        tailscale_layout.addRow("SSH timeout:", self.tailscale_timeout_spin)
+
+        self.tailscale_enabled_check.toggled.connect(self.tailscale_tags_edit.setEnabled)
+        self.tailscale_enabled_check.toggled.connect(self.tailscale_timeout_spin.setEnabled)
+        self.tailscale_tags_edit.setEnabled(config.tailscale_enabled)
+        self.tailscale_timeout_spin.setEnabled(config.tailscale_enabled)
+
+        tabs.addTab(tailscale_widget, "Tailscale")
+
+        # --- Buttons ---
         buttons = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
         )
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
-        layout.addRow(buttons)
+        layout.addWidget(buttons)
 
     def get_config(self) -> AppConfig:
         return AppConfig(
@@ -69,6 +108,9 @@ class SettingsDialog(QDialog):
             terminal=self.terminal_edit.text().strip(),
             noconfirm=self.noconfirm_check.isChecked(),
             autostart=self.autostart_check.isChecked(),
+            tailscale_enabled=self.tailscale_enabled_check.isChecked(),
+            tailscale_tags=self.tailscale_tags_edit.text().strip(),
+            tailscale_timeout=self.tailscale_timeout_spin.value(),
         )
 
 
@@ -92,13 +134,43 @@ class UpdateItemDelegate(QStyledItemDelegate):
     RESTART_BG = QColor(244, 67, 54, 25)
 
     def paint(self, painter: QPainter, option: QStyleOptionViewItem, index):
+        data = index.data(Qt.ItemDataRole.UserRole)
+        if isinstance(data, str):
+            self._paint_section_header(painter, option, data)
+            return
+        if not isinstance(data, UpdateInfo):
+            return
+        self._paint_update_card(painter, option, data)
+
+    def _paint_section_header(self, painter: QPainter, option: QStyleOptionViewItem, title: str):
         painter.save()
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
 
-        update: UpdateInfo = index.data(Qt.ItemDataRole.UserRole)
-        if not update:
-            painter.restore()
-            return
+        font = QFont(option.font)
+        font.setBold(True)
+        font.setPointSize(font.pointSize() + 1)
+        painter.setFont(font)
+        painter.setPen(option.palette.text().color())
+
+        x = option.rect.x() + self.CARD_MARGIN + self.CARD_PADDING
+        y = option.rect.y()
+        w = option.rect.width() - 2 * (self.CARD_MARGIN + self.CARD_PADDING)
+        h = option.rect.height()
+
+        painter.drawText(
+            int(x), int(y), int(w), int(h),
+            Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, title,
+        )
+
+        line_y = option.rect.bottom() - 1
+        painter.setPen(QPen(option.palette.mid().color(), 1))
+        painter.drawLine(int(x), line_y, int(x + w), line_y)
+
+        painter.restore()
+
+    def _paint_update_card(self, painter: QPainter, option: QStyleOptionViewItem, update: UpdateInfo):
+        painter.save()
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
 
         # Card rect with margin
         m = self.CARD_MARGIN
@@ -118,7 +190,6 @@ class UpdateItemDelegate(QStyledItemDelegate):
         else:
             base = option.palette.base().color()
             mid = option.palette.midlight().color()
-            # Blend slightly toward midlight for a subtle card effect
             card_bg = QColor(
                 (base.red() + mid.red()) // 2,
                 (base.green() + mid.green()) // 2,
@@ -228,6 +299,9 @@ class UpdateItemDelegate(QStyledItemDelegate):
         painter.restore()
 
     def sizeHint(self, option: QStyleOptionViewItem, index) -> QSize:
+        data = index.data(Qt.ItemDataRole.UserRole)
+        if isinstance(data, str):
+            return QSize(option.rect.width(), 32)
         return QSize(option.rect.width(), 58)
 
 
@@ -235,12 +309,18 @@ class UpdatesDialog(QDialog):
     def __init__(
         self,
         updates: list[UpdateInfo],
+        remote_hosts: list | None = None,
         on_update: Callable[[], None] | None = None,
         parent=None,
     ):
         super().__init__(parent)
         self.on_update = on_update
-        self.setWindowTitle(f"Available Updates ({len(updates)})")
+
+        remote_hosts = remote_hosts or []
+        has_remote = any(h.updates or h.error for h in remote_hosts)
+        total = len(updates) + sum(len(h.updates) for h in remote_hosts)
+
+        self.setWindowTitle(f"Available Updates ({total})")
         self.setWindowIcon(create_app_icon())
         self.setMinimumSize(300, 300)
 
@@ -258,11 +338,20 @@ class UpdatesDialog(QDialog):
         self.list_widget.setStyleSheet("QListWidget { background: transparent; border: none; }")
         self.list_widget.setSpacing(2)
 
+        # Local updates
+        if has_remote and updates:
+            self._add_section_header("Local")
         for update in updates:
-            item = QListWidgetItem()
-            item.setData(Qt.ItemDataRole.UserRole, update)
-            item.setSizeHint(QSize(0, 58))
-            self.list_widget.addItem(item)
+            self._add_update_item(update)
+
+        # Remote host updates
+        for host in remote_hosts:
+            if host.updates:
+                self._add_section_header(host.hostname)
+                for update in host.updates:
+                    self._add_update_item(update)
+            elif host.error:
+                self._add_section_header(f"{host.hostname} (unreachable)")
 
         layout.addWidget(self.list_widget)
 
@@ -279,6 +368,19 @@ class UpdatesDialog(QDialog):
         btn_layout.addWidget(close_btn)
 
         layout.addLayout(btn_layout)
+
+    def _add_section_header(self, title: str):
+        item = QListWidgetItem()
+        item.setData(Qt.ItemDataRole.UserRole, title)
+        item.setSizeHint(QSize(0, 32))
+        item.setFlags(Qt.ItemFlag.NoItemFlags)
+        self.list_widget.addItem(item)
+
+    def _add_update_item(self, update: UpdateInfo):
+        item = QListWidgetItem()
+        item.setData(Qt.ItemDataRole.UserRole, update)
+        item.setSizeHint(QSize(0, 58))
+        self.list_widget.addItem(item)
 
     def _launch_update(self):
         if self.on_update:
