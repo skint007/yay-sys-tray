@@ -84,9 +84,6 @@ class UpdateItemDelegate(QStyledItemDelegate):
     CARD_PADDING = 10
     CARD_RADIUS = 8
     NAME_FONT_SIZE_DELTA = 1
-    CARD_BG = QColor(245, 245, 245)
-    CARD_BORDER = QColor(220, 220, 220)
-    VERSION_COLOR = QColor(140, 140, 140)
     OLD_DIFF_COLOR = QColor(220, 50, 47)
     NEW_DIFF_COLOR = QColor(38, 162, 105)
     RESTART_COLOR = QColor(244, 67, 54)
@@ -110,15 +107,23 @@ class UpdateItemDelegate(QStyledItemDelegate):
             option.rect.height() - 2 * m,
         )
 
-        # Card background
+        # Card background (derived from system palette)
         path = QPainterPath()
         path.addRoundedRect(card_rect, self.CARD_RADIUS, self.CARD_RADIUS)
 
         if option.state & option.state.State_Selected:
             painter.fillPath(path, option.palette.highlight())
         else:
-            painter.fillPath(path, self.CARD_BG)
-            painter.setPen(QPen(self.CARD_BORDER, 1))
+            base = option.palette.base().color()
+            mid = option.palette.midlight().color()
+            # Blend slightly toward midlight for a subtle card effect
+            card_bg = QColor(
+                (base.red() + mid.red()) // 2,
+                (base.green() + mid.green()) // 2,
+                (base.blue() + mid.blue()) // 2,
+            )
+            painter.fillPath(path, card_bg)
+            painter.setPen(QPen(option.palette.mid().color(), 1))
             painter.drawPath(path)
 
         p = self.CARD_PADDING
@@ -177,11 +182,12 @@ class UpdateItemDelegate(QStyledItemDelegate):
         new_diff = update.new_version[diff_idx:]
 
         selected = bool(option.state & option.state.State_Selected)
+        dim_color = option.palette.placeholderText().color()
 
         # Old version: common part
         if old_common:
             painter.setPen(
-                option.palette.highlightedText().color() if selected else self.VERSION_COLOR
+                option.palette.highlightedText().color() if selected else dim_color
             )
             painter.drawText(int(vx), vy, int(w), vh, Qt.AlignmentFlag.AlignLeft, old_common)
             vx += fm.horizontalAdvance(old_common)
@@ -197,7 +203,7 @@ class UpdateItemDelegate(QStyledItemDelegate):
         # Arrow
         arrow = "  \u2192  "
         painter.setPen(
-            option.palette.highlightedText().color() if selected else self.VERSION_COLOR
+            option.palette.highlightedText().color() if selected else dim_color
         )
         painter.drawText(int(vx), vy, int(w), vh, Qt.AlignmentFlag.AlignLeft, arrow)
         vx += fm.horizontalAdvance(arrow)
@@ -205,7 +211,7 @@ class UpdateItemDelegate(QStyledItemDelegate):
         # New version: common part
         if new_common:
             painter.setPen(
-                option.palette.highlightedText().color() if selected else self.VERSION_COLOR
+                option.palette.highlightedText().color() if selected else dim_color
             )
             painter.drawText(int(vx), vy, int(w), vh, Qt.AlignmentFlag.AlignLeft, new_common)
             vx += fm.horizontalAdvance(new_common)
@@ -233,7 +239,7 @@ class UpdatesDialog(QDialog):
         super().__init__(parent)
         self.on_update = on_update
         self.setWindowTitle(f"Available Updates ({len(updates)})")
-        self.setMinimumSize(420, 380)
+        self.setMinimumSize(300, 300)
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(8, 8, 8, 8)
