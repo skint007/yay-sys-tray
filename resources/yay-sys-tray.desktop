@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=Yay Update Checker
+Comment=System tray update checker for Arch Linux
+Exec=yay-sys-tray
+Icon=system-software-update
+Terminal=false
+Categories=System;
+StartupNotify=false
+X-GNOME-Autostart-enabled=true
