@@ -30,6 +30,25 @@ class CheckResult:
     restart_packages: list[str]
 
 
+def parse_update_output(output: str) -> list[UpdateInfo]:
+    """Parse 'package old_version -> new_version' lines into UpdateInfo list."""
+    updates = []
+    for line in output.strip().splitlines():
+        line = line.strip()
+        if not line or " -> " not in line:
+            continue
+        parts = line.split()
+        if len(parts) >= 4 and parts[-2] == "->":
+            updates.append(
+                UpdateInfo(
+                    package=parts[0],
+                    old_version=parts[1],
+                    new_version=parts[-1],
+                )
+            )
+    return updates
+
+
 class UpdateChecker(QThread):
     check_complete = pyqtSignal(object)  # CheckResult
     check_error = pyqtSignal(str)
@@ -52,7 +71,7 @@ class UpdateChecker(QThread):
                 )
                 return
             if repo.returncode == 0:
-                updates.extend(self._parse_output(repo.stdout))
+                updates.extend(parse_update_output(repo.stdout))
 
             # Check AUR packages separately via yay
             aur = subprocess.run(
@@ -63,7 +82,7 @@ class UpdateChecker(QThread):
             )
             # yay -Qua: exit 0 = updates, exit 1 = no updates
             if aur.returncode == 0 and aur.stdout.strip():
-                updates.extend(self._parse_output(aur.stdout))
+                updates.extend(parse_update_output(aur.stdout))
 
             restart_pkgs = [u.package for u in updates if u.package in RESTART_PACKAGES]
             result = CheckResult(
@@ -78,22 +97,3 @@ class UpdateChecker(QThread):
             self.check_error.emit("Update check timed out after 120 seconds")
         except Exception as e:
             self.check_error.emit(str(e))
-
-    @staticmethod
-    def _parse_output(output: str) -> list[UpdateInfo]:
-        updates = []
-        for line in output.strip().splitlines():
-            line = line.strip()
-            if not line or " -> " not in line:
-                continue
-            parts = line.split()
-            # Format: "package old_version -> new_version"
-            if len(parts) >= 4 and parts[-2] == "->":
-                updates.append(
-                    UpdateInfo(
-                        package=parts[0],
-                        old_version=parts[1],
-                        new_version=parts[-1],
-                    )
-                )
-        return updates

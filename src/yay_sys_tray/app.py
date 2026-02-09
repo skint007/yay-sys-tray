@@ -13,6 +13,7 @@ from yay_sys_tray.icons import (
     create_restart_icon,
     create_updates_icon,
 )
+from yay_sys_tray.tailscale import HostResult, RemoteCheckResult, TailscaleChecker
 
 TERMINAL_CMDS = {
     "kitty": ["kitty", "--hold"],
@@ -28,9 +29,13 @@ class TrayApp(QObject):
         super().__init__()
         self.config = config
         self.updates: list[UpdateInfo] = []
+        self.local_result: CheckResult | None = None
+        self.remote_updates: list[HostResult] = []
         self.checker: UpdateChecker | None = None
+        self.tailscale_checker: TailscaleChecker | None = None
         self.update_process: QProcess | None = None
         self.last_check_time: datetime | None = None
+        self._old_count = 0
 
         # Tray icon
         self.tray = QSystemTrayIcon()
@@ -84,9 +89,14 @@ class TrayApp(QObject):
     def start_check(self):
         if self.checker is not None and self.checker.isRunning():
             return
+        if self.tailscale_checker is not None and self.tailscale_checker.isRunning():
+            return
         self.tray.setIcon(create_checking_icon())
         self.tray.setToolTip("Checking for updates...")
         self.action_check.setEnabled(False)
+        self._old_count = len(self.updates) + sum(
+            len(h.updates) for h in self.remote_updates
+        )
 
         self.checker = UpdateChecker()
         self.checker.check_complete.connect(self._on_check_complete)
@@ -95,40 +105,94 @@ class TrayApp(QObject):
         self.checker.start()
 
     def _on_check_complete(self, result: CheckResult):
-        old_count = len(self.updates)
         self.updates = result.updates
+        self.local_result = result
         self.last_check_time = datetime.now()
-        count = len(result.updates)
 
-        if count == 0:
-            self.tray.setIcon(create_ok_icon())
-            self.tray.setToolTip(f"System up to date\nLast check: {self._format_time()}")
-            self.action_show.setEnabled(False)
-        elif result.needs_restart:
-            self.tray.setIcon(create_restart_icon(count))
-            restart_list = ", ".join(result.restart_packages)
-            self.tray.setToolTip(
-                f"{count} update(s) available (restart required)\n"
-                f"Restart: {restart_list}\n"
-                f"Last check: {self._format_time()}"
-            )
-            self.action_show.setEnabled(True)
-            self._maybe_notify(count, old_count, restart=True)
+        # Chain remote check if Tailscale is enabled
+        if self.config.tailscale_enabled:
+            tags = [t.strip() for t in self.config.tailscale_tags.split(",") if t.strip()]
+            if tags:
+                self.tailscale_checker = TailscaleChecker(tags, self.config.tailscale_timeout)
+                self.tailscale_checker.check_complete.connect(self._on_remote_check_complete)
+                self.tailscale_checker.check_error.connect(self._on_remote_check_error)
+                self.tailscale_checker.finished.connect(self._on_remote_thread_finished)
+                self.tailscale_checker.start()
+                return
+
+        self.remote_updates = []
+        self._update_tray_state()
+
+    def _on_remote_check_complete(self, result: RemoteCheckResult):
+        self.remote_updates = result.hosts
+        self._update_tray_state()
+
+    def _on_remote_check_error(self, error_msg: str):
+        self.remote_updates = []
+        self._update_tray_state()
+
+    def _update_tray_state(self):
+        result = self.local_result
+        if result is None:
+            return
+
+        local_count = len(result.updates)
+        remote_update_count = sum(len(h.updates) for h in self.remote_updates)
+        remote_hosts_with_updates = [h for h in self.remote_updates if h.updates]
+        remote_needs_restart = any(h.needs_restart for h in self.remote_updates)
+        remote_errors = [h for h in self.remote_updates if h.error]
+        total_count = local_count + remote_update_count
+        any_restart = result.needs_restart or remote_needs_restart
+
+        # Build tooltip
+        lines = []
+        if self.remote_updates:
+            if local_count:
+                lines.append(f"Local: {local_count} update(s)")
+            for host in remote_hosts_with_updates:
+                lines.append(f"{host.hostname}: {len(host.updates)} update(s)")
+            if remote_errors:
+                lines.append(f"{len(remote_errors)} host(s) unreachable")
+            if not lines:
+                lines.append("All systems up to date")
         else:
-            self.tray.setIcon(create_updates_icon(count))
-            self.tray.setToolTip(
-                f"{count} update(s) available\nLast check: {self._format_time()}"
-            )
+            if total_count == 0:
+                lines.append("System up to date")
+            else:
+                lines.append(f"{total_count} update(s) available")
+                if result.needs_restart:
+                    lines.append(f"Restart: {', '.join(result.restart_packages)}")
+        lines.append(f"Last check: {self._format_time()}")
+
+        # Set icon
+        if total_count == 0:
+            self.tray.setIcon(create_ok_icon())
+            self.action_show.setEnabled(False)
+        elif any_restart:
+            self.tray.setIcon(create_restart_icon(total_count))
             self.action_show.setEnabled(True)
-            self._maybe_notify(count, old_count)
+        else:
+            self.tray.setIcon(create_updates_icon(total_count))
+            self.action_show.setEnabled(True)
+
+        self.tray.setToolTip("\n".join(lines))
+
+        if total_count > 0:
+            self._maybe_notify(total_count, self._old_count, restart=any_restart)
 
     def _on_check_error(self, error_msg: str):
         self.tray.setIcon(create_error_icon())
         self.tray.setToolTip(f"Error: {error_msg}")
 
     def _on_thread_finished(self):
-        self.action_check.setEnabled(True)
         self.checker = None
+        if self.tailscale_checker is None:
+            self.action_check.setEnabled(True)
+
+    def _on_remote_thread_finished(self):
+        self.tailscale_checker = None
+        if self.checker is None:
+            self.action_check.setEnabled(True)
 
     def _maybe_notify(self, new_count: int, old_count: int, restart: bool = False):
         if self.config.notify == "never":
@@ -165,7 +229,11 @@ class TrayApp(QObject):
     def show_updates_dialog(self):
         from yay_sys_tray.dialogs import UpdatesDialog
 
-        dialog = UpdatesDialog(self.updates, on_update=self.launch_update)
+        dialog = UpdatesDialog(
+            self.updates,
+            remote_hosts=self.remote_updates,
+            on_update=self.launch_update,
+        )
         dialog.exec()
 
     def show_settings_dialog(self):
