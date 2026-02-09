@@ -1,2 +1,0 @@
-[console_scripts]
-yay-sys-tray = yay_sys_tray.__main__:main
