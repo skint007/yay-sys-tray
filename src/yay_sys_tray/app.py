@@ -5,12 +5,13 @@ from PyQt6.QtCore import QObject, QTimer
 from PyQt6.QtGui import QAction
 from PyQt6.QtWidgets import QApplication, QMenu, QSystemTrayIcon
 
-from yay_sys_tray.checker import UpdateChecker, UpdateInfo
+from yay_sys_tray.checker import CheckResult, UpdateChecker, UpdateInfo
 from yay_sys_tray.config import AppConfig
 from yay_sys_tray.icons import (
     create_checking_icon,
     create_error_icon,
     create_ok_icon,
+    create_restart_icon,
     create_updates_icon,
 )
 
@@ -93,16 +94,26 @@ class TrayApp(QObject):
         self.checker.finished.connect(self._on_thread_finished)
         self.checker.start()
 
-    def _on_check_complete(self, updates: list[UpdateInfo]):
+    def _on_check_complete(self, result: CheckResult):
         old_count = len(self.updates)
-        self.updates = updates
+        self.updates = result.updates
         self.last_check_time = datetime.now()
-        count = len(updates)
+        count = len(result.updates)
 
         if count == 0:
             self.tray.setIcon(create_ok_icon())
             self.tray.setToolTip(f"System up to date\nLast check: {self._format_time()}")
             self.action_show.setEnabled(False)
+        elif result.needs_restart:
+            self.tray.setIcon(create_restart_icon(count))
+            restart_list = ", ".join(result.restart_packages)
+            self.tray.setToolTip(
+                f"{count} update(s) available (restart required)\n"
+                f"Restart: {restart_list}\n"
+                f"Last check: {self._format_time()}"
+            )
+            self.action_show.setEnabled(True)
+            self._maybe_notify(count, old_count, restart=True)
         else:
             self.tray.setIcon(create_updates_icon(count))
             self.tray.setToolTip(
@@ -119,15 +130,21 @@ class TrayApp(QObject):
         self.action_check.setEnabled(True)
         self.checker = None
 
-    def _maybe_notify(self, new_count: int, old_count: int):
+    def _maybe_notify(self, new_count: int, old_count: int, restart: bool = False):
         if self.config.notify == "never":
             return
         if self.config.notify == "new_only" and new_count <= old_count:
             return
+        if restart:
+            title = "Updates Available (Restart Required)"
+            icon = QSystemTrayIcon.MessageIcon.Warning
+        else:
+            title = "Updates Available"
+            icon = QSystemTrayIcon.MessageIcon.Information
         self.tray.showMessage(
-            "Updates Available",
+            title,
             f"{new_count} package update(s) available",
-            QSystemTrayIcon.MessageIcon.Information,
+            icon,
             5000,
         )
 

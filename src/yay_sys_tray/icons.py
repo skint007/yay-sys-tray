@@ -94,6 +94,23 @@ def create_checking_icon() -> QIcon:
     return QIcon(pixmap)
 
 
+def create_restart_icon(count: int) -> QIcon:
+    pixmap, painter = _make_pixmap(RED)
+    painter.setPen(QPen(WHITE))
+    text = str(count) if count <= 99 else "99+"
+    if len(text) == 1:
+        font_size = 32
+    elif len(text) == 2:
+        font_size = 26
+    else:
+        font_size = 20
+    font = QFont("sans-serif", font_size, QFont.Weight.Bold)
+    painter.setFont(font)
+    painter.drawText(INSET, INSET, DIAMETER, DIAMETER, Qt.AlignmentFlag.AlignCenter, text)
+    painter.end()
+    return QIcon(pixmap)
+
+
 def create_error_icon() -> QIcon:
     pixmap, painter = _make_pixmap(RED)
     painter.setPen(_white_pen(6))

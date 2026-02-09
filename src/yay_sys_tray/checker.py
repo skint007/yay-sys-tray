@@ -3,6 +3,18 @@ from dataclasses import dataclass
 
 from PyQt6.QtCore import QThread, pyqtSignal
 
+# Packages that require a system restart when updated
+RESTART_PACKAGES = {
+    "linux",
+    "linux-lts",
+    "linux-zen",
+    "linux-hardened",
+    "systemd",
+    "glibc",
+    "nvidia",
+    "nvidia-lts",
+}
+
 
 @dataclass
 class UpdateInfo:
@@ -11,8 +23,15 @@ class UpdateInfo:
     new_version: str
 
 
+@dataclass
+class CheckResult:
+    updates: list[UpdateInfo]
+    needs_restart: bool
+    restart_packages: list[str]
+
+
 class UpdateChecker(QThread):
-    check_complete = pyqtSignal(list)  # list[UpdateInfo]
+    check_complete = pyqtSignal(object)  # CheckResult
     check_error = pyqtSignal(str)
 
     def run(self):
@@ -46,7 +65,13 @@ class UpdateChecker(QThread):
             if aur.returncode == 0 and aur.stdout.strip():
                 updates.extend(self._parse_output(aur.stdout))
 
-            self.check_complete.emit(updates)
+            restart_pkgs = [u.package for u in updates if u.package in RESTART_PACKAGES]
+            result = CheckResult(
+                updates=updates,
+                needs_restart=len(restart_pkgs) > 0,
+                restart_packages=restart_pkgs,
+            )
+            self.check_complete.emit(result)
         except FileNotFoundError as e:
             self.check_error.emit(f"Command not found: {e.filename}")
         except subprocess.TimeoutExpired:
