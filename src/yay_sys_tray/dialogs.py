@@ -11,6 +11,7 @@ from PyQt6.QtWidgets import (
     QDialogButtonBox,
     QFormLayout,
     QHBoxLayout,
+    QLabel,
     QLineEdit,
     QListWidget,
     QListWidgetItem,
@@ -305,6 +306,40 @@ class UpdateItemDelegate(QStyledItemDelegate):
         return QSize(option.rect.width(), 58)
 
 
+def _make_update_list(updates: list[UpdateInfo], parent: QWidget) -> QListWidget:
+    """Create a styled QListWidget populated with update cards."""
+    lw = QListWidget(parent)
+    lw.setItemDelegate(UpdateItemDelegate(lw))
+    lw.setSelectionMode(QListWidget.SelectionMode.NoSelection)
+    lw.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+    lw.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+    lw.setResizeMode(QListWidget.ResizeMode.Adjust)
+    lw.setStyleSheet("QListWidget { background: transparent; border: none; }")
+    lw.setSpacing(2)
+    for update in updates:
+        item = QListWidgetItem()
+        item.setData(Qt.ItemDataRole.UserRole, update)
+        item.setSizeHint(QSize(0, 58))
+        lw.addItem(item)
+    return lw
+
+
+def _make_restart_banner() -> QLabel:
+    """Create a styled restart-required warning banner."""
+    label = QLabel("Restart required")
+    label.setStyleSheet(
+        "QLabel {"
+        "  background-color: rgba(244, 67, 54, 0.15);"
+        "  color: #F44336;"
+        "  font-weight: bold;"
+        "  padding: 6px 10px;"
+        "  border-radius: 4px;"
+        "}"
+    )
+    label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+    return label
+
+
 class UpdatesDialog(QDialog):
     def __init__(
         self,
@@ -317,8 +352,8 @@ class UpdatesDialog(QDialog):
         self.on_update = on_update
 
         remote_hosts = remote_hosts or []
-        has_remote = any(h.updates or h.error for h in remote_hosts)
         total = len(updates) + sum(len(h.updates) for h in remote_hosts)
+        has_remote = any(h.updates or h.error for h in remote_hosts)
 
         self.setWindowTitle(f"Available Updates ({total})")
         self.setWindowIcon(create_app_icon())
@@ -327,38 +362,52 @@ class UpdatesDialog(QDialog):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(8, 8, 8, 8)
 
-        self.list_widget = QListWidget()
-        self.list_widget.setItemDelegate(UpdateItemDelegate(self.list_widget))
-        self.list_widget.setSelectionMode(QListWidget.SelectionMode.NoSelection)
-        self.list_widget.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-        self.list_widget.setHorizontalScrollBarPolicy(
-            Qt.ScrollBarPolicy.ScrollBarAlwaysOff
-        )
-        self.list_widget.setResizeMode(QListWidget.ResizeMode.Adjust)
-        self.list_widget.setStyleSheet("QListWidget { background: transparent; border: none; }")
-        self.list_widget.setSpacing(2)
+        if has_remote:
+            # Tabbed view: one tab per host
+            local_needs_restart = any(u.package in RESTART_PACKAGES for u in updates)
+            tabs = QTabWidget()
 
-        # Local updates
-        if has_remote and updates:
-            self._add_section_header("Local")
-        for update in updates:
-            self._add_update_item(update)
+            local_tab = self._build_tab(updates, local_needs_restart, on_update)
+            local_label = f"Local ({len(updates)})"
+            tabs.addTab(local_tab, local_label)
+            if local_needs_restart:
+                tabs.setTabToolTip(0, "Restart required")
 
-        # Remote host updates
-        for host in remote_hosts:
-            if host.updates:
-                self._add_section_header(host.hostname)
-                for update in host.updates:
-                    self._add_update_item(update)
-            elif host.error:
-                self._add_section_header(f"{host.hostname} (unreachable)")
+            for host in remote_hosts:
+                if host.error:
+                    error_widget = QWidget()
+                    error_layout = QVBoxLayout(error_widget)
+                    error_layout.addWidget(
+                        QLabel(f"Could not reach {host.hostname}: {host.error}"),
+                    )
+                    error_layout.addStretch()
+                    tab_label = f"{host.hostname} (error)"
+                    tabs.addTab(error_widget, tab_label)
+                else:
+                    tab = self._build_tab(host.updates, host.needs_restart)
+                    tab_label = f"{host.hostname} ({len(host.updates)})"
+                    idx = tabs.addTab(tab, tab_label)
+                    if host.needs_restart:
+                        tabs.setTabToolTip(idx, "Restart required")
 
-        layout.addWidget(self.list_widget)
+            # Style tabs that need restart with red text
+            for i in range(tabs.count()):
+                tooltip = tabs.tabToolTip(i)
+                if tooltip == "Restart required":
+                    tabs.tabBar().setTabTextColor(i, QColor(244, 67, 54))
+
+            layout.addWidget(tabs)
+        else:
+            # Single list, no tabs needed
+            needs_restart = any(u.package in RESTART_PACKAGES for u in updates)
+            if needs_restart:
+                layout.addWidget(_make_restart_banner())
+            layout.addWidget(_make_update_list(updates, self))
 
         btn_layout = QHBoxLayout()
         btn_layout.addStretch()
 
-        if on_update:
+        if on_update and not has_remote:
             update_btn = QPushButton("Update Now")
             update_btn.clicked.connect(self._launch_update)
             btn_layout.addWidget(update_btn)
@@ -369,18 +418,34 @@ class UpdatesDialog(QDialog):
 
         layout.addLayout(btn_layout)
 
-    def _add_section_header(self, title: str):
-        item = QListWidgetItem()
-        item.setData(Qt.ItemDataRole.UserRole, title)
-        item.setSizeHint(QSize(0, 32))
-        item.setFlags(Qt.ItemFlag.NoItemFlags)
-        self.list_widget.addItem(item)
+    def _build_tab(
+        self,
+        updates: list[UpdateInfo],
+        needs_restart: bool,
+        on_update: Callable[[], None] | None = None,
+    ) -> QWidget:
+        widget = QWidget()
+        tab_layout = QVBoxLayout(widget)
+        tab_layout.setContentsMargins(0, 4, 0, 0)
 
-    def _add_update_item(self, update: UpdateInfo):
-        item = QListWidgetItem()
-        item.setData(Qt.ItemDataRole.UserRole, update)
-        item.setSizeHint(QSize(0, 58))
-        self.list_widget.addItem(item)
+        if needs_restart:
+            tab_layout.addWidget(_make_restart_banner())
+
+        tab_layout.addWidget(_make_update_list(updates, widget))
+
+        if on_update:
+            btn_row = QHBoxLayout()
+            btn_row.addStretch()
+            update_btn = QPushButton("Update Now")
+            update_btn.clicked.connect(lambda: self._do_update(on_update))
+            btn_row.addWidget(update_btn)
+            tab_layout.addLayout(btn_row)
+
+        return widget
+
+    def _do_update(self, callback: Callable[[], None]):
+        callback()
+        self.close()
 
     def _launch_update(self):
         if self.on_update:
