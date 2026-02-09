@@ -1,6 +1,0 @@
-Metadata-Version: 2.4
-Name: yay-sys-tray
-Version: 0.1.0
-Summary: Arch Linux system tray update checker using yay
-Requires-Python: >=3.12
-Requires-Dist: PyQt6
