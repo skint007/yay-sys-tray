@@ -118,3 +118,23 @@ def create_error_icon() -> QIcon:
     painter.drawLine(42, 22, 22, 42)
     painter.end()
     return QIcon(pixmap)
+
+
+def create_app_icon() -> QIcon:
+    """App window icon: Arch-inspired upward arrow on a blue circle."""
+    pixmap, painter = _make_pixmap(QColor(23, 147, 209))
+    painter.setPen(Qt.PenStyle.NoPen)
+    painter.setBrush(QBrush(WHITE))
+    # Upward-pointing arrow/chevron (Arch-style)
+    path = QPainterPath()
+    cx, cy = 32.0, 30.0
+    path.moveTo(cx, cy - 16)       # top point
+    path.lineTo(cx + 14, cy + 14)  # bottom right
+    path.lineTo(cx + 7, cy + 14)   # inner right
+    path.lineTo(cx, cy + 2)        # inner notch
+    path.lineTo(cx - 7, cy + 14)   # inner left
+    path.lineTo(cx - 14, cy + 14)  # bottom left
+    path.closeSubpath()
+    painter.drawPath(path)
+    painter.end()
+    return QIcon(pixmap)
