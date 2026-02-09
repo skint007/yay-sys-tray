@@ -1,7 +1,6 @@
-import subprocess
 from datetime import datetime
 
-from PyQt6.QtCore import QObject, QTimer
+from PyQt6.QtCore import QObject, QProcess, QTimer
 from PyQt6.QtGui import QAction
 from PyQt6.QtWidgets import QApplication, QMenu, QSystemTrayIcon
 
@@ -30,6 +29,7 @@ class TrayApp(QObject):
         self.config = config
         self.updates: list[UpdateInfo] = []
         self.checker: UpdateChecker | None = None
+        self.update_process: QProcess | None = None
         self.last_check_time: datetime | None = None
 
         # Tray icon
@@ -154,7 +154,13 @@ class TrayApp(QObject):
         if self.config.noconfirm:
             yay_cmd.append("--noconfirm")
         prefix = TERMINAL_CMDS.get(terminal, [terminal, "-e"])
-        subprocess.Popen(prefix + yay_cmd)
+        self.update_process = QProcess(self)
+        self.update_process.finished.connect(self._on_update_finished)
+        self.update_process.start(prefix[0], prefix[1:] + yay_cmd)
+
+    def _on_update_finished(self):
+        self.update_process = None
+        self.start_check()
 
     def show_updates_dialog(self):
         from yay_sys_tray.dialogs import UpdatesDialog
