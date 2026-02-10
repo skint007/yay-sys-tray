@@ -1,5 +1,7 @@
+import math
+
 from PyQt6.QtCore import Qt, QPointF
-from PyQt6.QtGui import QBrush, QColor, QFont, QIcon, QPainter, QPainterPath, QPen, QPixmap
+from PyQt6.QtGui import QBrush, QColor, QFont, QIcon, QPainter, QPainterPath, QPen, QPixmap, QTransform
 
 SIZE = 64
 INSET = 2
@@ -55,16 +57,13 @@ def create_updates_icon(count: int) -> QIcon:
     return QIcon(pixmap)
 
 
-def create_checking_icon() -> QIcon:
+def _create_checking_pixmap() -> QPixmap:
+    """Create the base checking (circular arrow) pixmap."""
     pixmap, painter = _make_pixmap(BLUE)
     painter.setPen(_white_pen(4))
     painter.setBrush(Qt.BrushStyle.NoBrush)
-    # Draw a circular arrow (arc + arrowhead)
     cx, cy, r = 32.0, 32.0, 14.0
     path = QPainterPath()
-    # Arc from ~30 degrees to ~330 degrees
-    import math
-
     steps = 20
     start_angle = math.radians(30)
     end_angle = math.radians(300)
@@ -77,7 +76,6 @@ def create_checking_icon() -> QIcon:
         else:
             path.lineTo(x, y)
     painter.drawPath(path)
-    # Arrowhead at the end of the arc
     end_x = cx + r * math.cos(end_angle)
     end_y = cy - r * math.sin(end_angle)
     painter.setPen(_white_pen(3))
@@ -89,6 +87,50 @@ def create_checking_icon() -> QIcon:
     painter.drawLine(
         QPointF(end_x, end_y),
         QPointF(end_x + arrow_len, end_y + arrow_len * 0.3),
+    )
+    painter.end()
+    return pixmap
+
+
+def create_checking_icon() -> QIcon:
+    return QIcon(_create_checking_pixmap())
+
+
+def create_checking_frames(count: int = 12) -> list[QIcon]:
+    """Generate rotated frames of the checking icon for spin animation."""
+    base = _create_checking_pixmap()
+    frames = []
+    for i in range(count):
+        angle = 360.0 * i / count
+        rotated = QPixmap(SIZE, SIZE)
+        rotated.fill(Qt.GlobalColor.transparent)
+        painter = QPainter(rotated)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
+        painter.translate(SIZE / 2, SIZE / 2)
+        painter.rotate(angle)
+        painter.translate(-SIZE / 2, -SIZE / 2)
+        painter.drawPixmap(0, 0, base)
+        painter.end()
+        frames.append(QIcon(rotated))
+    return frames
+
+
+def create_bounce_icon(base_icon: QIcon, scale: float) -> QIcon:
+    """Create a scaled version of an icon for bounce animation.
+
+    scale=1.0 is normal, scale=0.75 shrinks the content toward center.
+    """
+    base_pixmap = base_icon.pixmap(SIZE, SIZE)
+    pixmap = QPixmap(SIZE, SIZE)
+    pixmap.fill(Qt.GlobalColor.transparent)
+    painter = QPainter(pixmap)
+    painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
+    offset = SIZE * (1 - scale) / 2
+    painter.drawPixmap(
+        int(offset), int(offset),
+        int(SIZE * scale), int(SIZE * scale),
+        base_pixmap,
     )
     painter.end()
     return QIcon(pixmap)

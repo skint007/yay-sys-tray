@@ -1,13 +1,14 @@
 from datetime import datetime
 
 from PyQt6.QtCore import QObject, QProcess, QTimer
-from PyQt6.QtGui import QAction
+from PyQt6.QtGui import QAction, QIcon
 from PyQt6.QtWidgets import QApplication, QMenu, QSystemTrayIcon
 
 from yay_sys_tray.checker import CheckResult, UpdateChecker, UpdateInfo
 from yay_sys_tray.config import AppConfig
 from yay_sys_tray.icons import (
-    create_checking_icon,
+    create_bounce_icon,
+    create_checking_frames,
     create_error_icon,
     create_ok_icon,
     create_restart_icon,
@@ -36,6 +37,19 @@ class TrayApp(QObject):
         self.update_process: QProcess | None = None
         self.last_check_time: datetime | None = None
         self._old_count = 0
+
+        # Spin animation (checking)
+        self._spin_frames: list[QIcon] = create_checking_frames(12)
+        self._spin_index = 0
+        self._spin_timer = QTimer()
+        self._spin_timer.timeout.connect(self._spin_tick)
+
+        # Bounce animation (updates found)
+        self._bounce_timer = QTimer()
+        self._bounce_timer.timeout.connect(self._bounce_tick)
+        self._bounce_count = 0
+        self._bounce_icon: QIcon | None = None
+        self._bounce_small: QIcon | None = None
 
         # Tray icon
         self.tray = QSystemTrayIcon()
@@ -91,7 +105,8 @@ class TrayApp(QObject):
             return
         if self.tailscale_checker is not None and self.tailscale_checker.isRunning():
             return
-        self.tray.setIcon(create_checking_icon())
+        self._stop_bounce()
+        self._start_spin()
         self.tray.setToolTip("Checking for updates...")
         self.action_check.setEnabled(False)
         self._old_count = len(self.updates) + sum(
@@ -103,6 +118,46 @@ class TrayApp(QObject):
         self.checker.check_error.connect(self._on_check_error)
         self.checker.finished.connect(self._on_thread_finished)
         self.checker.start()
+
+    # -- Spin animation (checking) --
+
+    def _start_spin(self):
+        self._spin_index = 0
+        self.tray.setIcon(self._spin_frames[0])
+        self._spin_timer.start(80)
+
+    def _stop_spin(self):
+        self._spin_timer.stop()
+
+    def _spin_tick(self):
+        self._spin_index = (self._spin_index + 1) % len(self._spin_frames)
+        self.tray.setIcon(self._spin_frames[self._spin_index])
+
+    # -- Bounce animation (updates found) --
+
+    def _start_bounce(self, icon: QIcon):
+        self._bounce_icon = icon
+        self._bounce_small = create_bounce_icon(icon, 0.65)
+        self._bounce_count = 0
+        self._bounce_timer.start(250)
+
+    def _stop_bounce(self):
+        self._bounce_timer.stop()
+        if self._bounce_icon:
+            self.tray.setIcon(self._bounce_icon)
+
+    def _bounce_tick(self):
+        self._bounce_count += 1
+        if self._bounce_count >= 8:
+            self._bounce_timer.stop()
+            if self._bounce_icon:
+                self.tray.setIcon(self._bounce_icon)
+            return
+        # Alternate between small and normal
+        if self._bounce_count % 2 == 1:
+            self.tray.setIcon(self._bounce_small)
+        else:
+            self.tray.setIcon(self._bounce_icon)
 
     def _on_check_complete(self, result: CheckResult):
         self.updates = result.updates
@@ -132,15 +187,14 @@ class TrayApp(QObject):
         self._update_tray_state()
 
     def _update_tray_state(self):
+        self._stop_spin()
         result = self.local_result
         if result is None:
             return
 
         local_count = len(result.updates)
         remote_update_count = sum(len(h.updates) for h in self.remote_updates)
-        remote_hosts_with_updates = [h for h in self.remote_updates if h.updates]
         remote_needs_restart = any(h.needs_restart for h in self.remote_updates)
-        remote_errors = [h for h in self.remote_updates if h.error]
         total_count = local_count + remote_update_count
         any_restart = result.needs_restart or remote_needs_restart
 
@@ -175,11 +229,15 @@ class TrayApp(QObject):
             self.tray.setIcon(create_ok_icon())
             self.action_show.setEnabled(False)
         elif any_restart:
-            self.tray.setIcon(create_restart_icon(total_count))
+            icon = create_restart_icon(total_count)
+            self.tray.setIcon(icon)
             self.action_show.setEnabled(True)
+            self._start_bounce(icon)
         else:
-            self.tray.setIcon(create_updates_icon(total_count))
+            icon = create_updates_icon(total_count)
+            self.tray.setIcon(icon)
             self.action_show.setEnabled(True)
+            self._start_bounce(icon)
 
         self.tray.setToolTip("\n".join(lines))
 
@@ -187,6 +245,7 @@ class TrayApp(QObject):
             self._maybe_notify(total_count, self._old_count, restart=any_restart)
 
     def _on_check_error(self, error_msg: str):
+        self._stop_spin()
         self.tray.setIcon(create_error_icon())
         self.tray.setToolTip(f"Error: {error_msg}")
 
