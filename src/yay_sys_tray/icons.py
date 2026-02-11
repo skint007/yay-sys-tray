@@ -136,6 +136,18 @@ def create_bounce_icon(base_icon: QIcon, scale: float) -> QIcon:
     return QIcon(pixmap)
 
 
+def create_reboot_icon() -> QIcon:
+    """Red circle with white exclamation point — reboot required."""
+    pixmap, painter = _make_pixmap(RED)
+    painter.setPen(_white_pen(6))
+    painter.drawLine(32, 14, 32, 36)
+    painter.setPen(Qt.PenStyle.NoPen)
+    painter.setBrush(QBrush(WHITE))
+    painter.drawEllipse(28, 42, 8, 8)
+    painter.end()
+    return QIcon(pixmap)
+
+
 def create_restart_icon(count: int) -> QIcon:
     pixmap, painter = _make_pixmap(RED)
     painter.setPen(QPen(WHITE))
