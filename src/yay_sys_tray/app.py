@@ -1,6 +1,6 @@
 from datetime import datetime
 
-from PyQt6.QtCore import QObject, QProcess, QTimer
+from PyQt6.QtCore import QObject, QProcess, Qt, QTimer
 from PyQt6.QtGui import QAction, QIcon
 from PyQt6.QtWidgets import QApplication, QMenu, QSystemTrayIcon
 
@@ -11,6 +11,7 @@ from yay_sys_tray.icons import (
     create_checking_frames,
     create_error_icon,
     create_ok_icon,
+    create_reboot_icon,
     create_restart_icon,
     create_updates_icon,
 )
@@ -37,6 +38,8 @@ class TrayApp(QObject):
         self.update_process: QProcess | None = None
         self.last_check_time: datetime | None = None
         self._old_count = 0
+        self._updates_dialog = None
+        self._settings_dialog = None
 
         # Spin animation (checking)
         self._spin_frames: list[QIcon] = create_checking_frames(12)
@@ -135,11 +138,12 @@ class TrayApp(QObject):
 
     # -- Bounce animation (updates found) --
 
-    def _start_bounce(self, icon: QIcon):
+    def _start_bounce(self, icon: QIcon, interval: int = 250, ticks: int = 8):
         self._bounce_icon = icon
         self._bounce_small = create_bounce_icon(icon, 0.65)
         self._bounce_count = 0
-        self._bounce_timer.start(250)
+        self._bounce_max = ticks
+        self._bounce_timer.start(interval)
 
     def _stop_bounce(self):
         self._bounce_timer.stop()
@@ -148,7 +152,7 @@ class TrayApp(QObject):
 
     def _bounce_tick(self):
         self._bounce_count += 1
-        if self._bounce_count >= 8:
+        if self._bounce_count >= self._bounce_max:
             self._bounce_timer.stop()
             if self._bounce_icon:
                 self.tray.setIcon(self._bounce_icon)
@@ -225,7 +229,17 @@ class TrayApp(QObject):
         lines.append(f"Last check: {self._format_time()}")
 
         # Set icon
-        if total_count == 0:
+        reboot = result.reboot_info
+        if total_count == 0 and reboot and reboot.needed:
+            icon = create_reboot_icon()
+            self.tray.setIcon(icon)
+            self.action_show.setEnabled(False)
+            self._start_bounce(icon, interval=1000, ticks=16)
+            lines.insert(0, "Restart required")
+            lines.insert(1, f"Running: {reboot.running_kernel}")
+            if reboot.installed_kernel:
+                lines.insert(2, f"Installed: {reboot.installed_kernel}")
+        elif total_count == 0:
             self.tray.setIcon(create_ok_icon())
             self.action_show.setEnabled(False)
         elif any_restart:
@@ -294,28 +308,52 @@ class TrayApp(QObject):
     def show_updates_dialog(self):
         from yay_sys_tray.dialogs import UpdatesDialog
 
-        dialog = UpdatesDialog(
+        if self._updates_dialog is not None:
+            self._updates_dialog.raise_()
+            self._updates_dialog.activateWindow()
+            return
+
+        self._updates_dialog = UpdatesDialog(
             self.updates,
             remote_hosts=self.remote_updates,
             on_update=self.launch_update,
         )
-        dialog.exec()
+        self._updates_dialog.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
+        self._updates_dialog.destroyed.connect(self._on_updates_dialog_closed)
+        self._updates_dialog.show()
+
+    def _on_updates_dialog_closed(self):
+        self._updates_dialog = None
 
     def show_settings_dialog(self):
         from yay_sys_tray.dialogs import SettingsDialog
 
-        from PyQt6.QtWidgets import QDialog
+        if self._settings_dialog is not None:
+            self._settings_dialog.raise_()
+            self._settings_dialog.activateWindow()
+            return
 
-        dialog = SettingsDialog(self.config)
-        if dialog.exec() == QDialog.DialogCode.Accepted:
-            self.config = dialog.get_config()
-            self.config.save()
-            self.config.manage_autostart()
-            self._restart_timer()
+        self._settings_dialog = SettingsDialog(self.config)
+        self._settings_dialog.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
+        self._settings_dialog.accepted.connect(self._on_settings_accepted)
+        self._settings_dialog.destroyed.connect(self._on_settings_dialog_closed)
+        self._settings_dialog.show()
+
+    def _on_settings_accepted(self):
+        self.config = self._settings_dialog.get_config()
+        self.config.save()
+        self.config.manage_autostart()
+        self._restart_timer()
+
+    def _on_settings_dialog_closed(self):
+        self._settings_dialog = None
 
     def _on_tray_activated(self, reason):
         if reason == QSystemTrayIcon.ActivationReason.Trigger:
-            if self.updates:
+            has_updates = self.updates or any(
+                h.updates for h in self.remote_updates
+            )
+            if has_updates:
                 self.show_updates_dialog()
             else:
                 self.start_check()

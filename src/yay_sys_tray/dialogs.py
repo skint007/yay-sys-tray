@@ -308,6 +308,10 @@ class UpdateItemDelegate(QStyledItemDelegate):
 
 def _make_update_list(updates: list[UpdateInfo], parent: QWidget) -> QListWidget:
     """Create a styled QListWidget populated with update cards."""
+    sorted_updates = sorted(
+        updates,
+        key=lambda u: (u.package not in RESTART_PACKAGES, u.package.lower()),
+    )
     lw = QListWidget(parent)
     lw.setItemDelegate(UpdateItemDelegate(lw))
     lw.setSelectionMode(QListWidget.SelectionMode.NoSelection)
@@ -316,7 +320,7 @@ def _make_update_list(updates: list[UpdateInfo], parent: QWidget) -> QListWidget
     lw.setResizeMode(QListWidget.ResizeMode.Adjust)
     lw.setStyleSheet("QListWidget { background: transparent; border: none; }")
     lw.setSpacing(2)
-    for update in updates:
+    for update in sorted_updates:
         item = QListWidgetItem()
         item.setData(Qt.ItemDataRole.UserRole, update)
         item.setSizeHint(QSize(0, 58))
