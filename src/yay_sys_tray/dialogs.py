@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Callable
 
-from PyQt6.QtCore import QRectF, QSize, Qt
+from PyQt6.QtCore import QRectF, QSettings, QSize, Qt
 from PyQt6.QtGui import QColor, QFont, QPainter, QPainterPath, QPen
 from PyQt6.QtWidgets import (
     QCheckBox,
@@ -363,6 +363,10 @@ class UpdatesDialog(QDialog):
         self.setWindowIcon(create_app_icon())
         self.setMinimumSize(300, 300)
 
+        settings = QSettings("yay-sys-tray", "yay-sys-tray")
+        if settings.contains("updates_dialog/size"):
+            self.resize(settings.value("updates_dialog/size"))
+
         layout = QVBoxLayout(self)
         layout.setContentsMargins(8, 8, 8, 8)
 
@@ -446,6 +450,11 @@ class UpdatesDialog(QDialog):
             tab_layout.addLayout(btn_row)
 
         return widget
+
+    def closeEvent(self, event):
+        settings = QSettings("yay-sys-tray", "yay-sys-tray")
+        settings.setValue("updates_dialog/size", self.size())
+        super().closeEvent(event)
 
     def _do_update(self, callback: Callable[[], None]):
         callback()

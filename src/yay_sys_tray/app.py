@@ -255,6 +255,14 @@ class TrayApp(QObject):
 
         self.tray.setToolTip("\n".join(lines))
 
+        # Refresh open updates dialog with latest data
+        if self._updates_dialog is not None:
+            self._updates_dialog.destroyed.disconnect(self._on_updates_dialog_closed)
+            self._updates_dialog.close()
+            self._updates_dialog = None
+            if total_count > 0:
+                self._open_updates_dialog()
+
         if total_count > 0:
             self._maybe_notify(total_count, self._old_count, restart=any_restart)
 
@@ -306,12 +314,16 @@ class TrayApp(QObject):
         self.start_check()
 
     def show_updates_dialog(self):
-        from yay_sys_tray.dialogs import UpdatesDialog
-
         if self._updates_dialog is not None:
             self._updates_dialog.raise_()
             self._updates_dialog.activateWindow()
             return
+
+        self._open_updates_dialog()
+        self.start_check()
+
+    def _open_updates_dialog(self):
+        from yay_sys_tray.dialogs import UpdatesDialog
 
         self._updates_dialog = UpdatesDialog(
             self.updates,
