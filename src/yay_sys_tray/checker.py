@@ -22,6 +22,9 @@ class UpdateInfo:
     package: str
     old_version: str
     new_version: str
+    description: str = ""
+    repository: str = ""
+    url: str = ""
 
 
 @dataclass
@@ -56,6 +59,53 @@ def parse_update_output(output: str) -> list[UpdateInfo]:
                 )
             )
     return updates
+
+
+def fetch_descriptions(packages: list[str]) -> dict[str, str]:
+    """Fetch package descriptions from the local pacman database."""
+    if not packages:
+        return {}
+    try:
+        result = subprocess.run(
+            ["pacman", "-Qi"] + packages,
+            capture_output=True, text=True, timeout=10,
+        )
+        descriptions: dict[str, str] = {}
+        name = None
+        for line in result.stdout.splitlines():
+            if line.startswith("Name"):
+                name = line.split(":", 1)[1].strip()
+            elif line.startswith("Description") and name:
+                descriptions[name] = line.split(":", 1)[1].strip()
+        return descriptions
+    except Exception:
+        return {}
+
+
+def fetch_repositories(packages: list[str]) -> dict[str, tuple[str, str]]:
+    """Fetch repository name and architecture from the pacman sync database."""
+    if not packages:
+        return {}
+    try:
+        result = subprocess.run(
+            ["pacman", "-Si"] + packages,
+            capture_output=True, text=True, timeout=10,
+        )
+        repos: dict[str, tuple[str, str]] = {}
+        current_repo = ""
+        current_name = ""
+        for line in result.stdout.splitlines():
+            if line.startswith("Repository"):
+                current_repo = line.split(":", 1)[1].strip()
+            elif line.startswith("Name"):
+                current_name = line.split(":", 1)[1].strip()
+            elif line.startswith("Architecture") and current_name:
+                arch = line.split(":", 1)[1].strip()
+                repos[current_name] = (current_repo, arch)
+                current_name = ""
+        return repos
+    except Exception:
+        return {}
 
 
 def check_reboot_needed() -> RebootInfo:
@@ -102,6 +152,7 @@ class UpdateChecker(QThread):
     def run(self):
         try:
             updates = []
+            repo_packages: list[UpdateInfo] = []
 
             # checkupdates syncs a temp database copy, so results are always fresh
             repo = subprocess.run(
@@ -117,7 +168,8 @@ class UpdateChecker(QThread):
                 )
                 return
             if repo.returncode == 0:
-                updates.extend(parse_update_output(repo.stdout))
+                repo_packages = parse_update_output(repo.stdout)
+                updates.extend(repo_packages)
 
             # Check AUR packages separately via yay
             aur = subprocess.run(
@@ -128,7 +180,23 @@ class UpdateChecker(QThread):
             )
             # yay -Qua: exit 0 = updates, exit 1 = no updates
             if aur.returncode == 0 and aur.stdout.strip():
-                updates.extend(parse_update_output(aur.stdout))
+                aur_packages = parse_update_output(aur.stdout)
+                for u in aur_packages:
+                    u.repository = "aur"
+                    u.url = f"https://aur.archlinux.org/packages/{u.package}"
+                updates.extend(aur_packages)
+
+            descs = fetch_descriptions([u.package for u in updates])
+            for u in updates:
+                u.description = descs.get(u.package, "")
+
+            if repo_packages:
+                repos = fetch_repositories([u.package for u in repo_packages])
+                for u in repo_packages:
+                    info = repos.get(u.package)
+                    if info:
+                        u.repository, arch = info
+                        u.url = f"https://archlinux.org/packages/{u.repository}/{arch}/{u.package}/"
 
             restart_pkgs = [u.package for u in updates if u.package in RESTART_PACKAGES]
             result = CheckResult(
