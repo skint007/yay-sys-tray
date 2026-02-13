@@ -37,6 +37,7 @@ class SettingsDialog(QDialog):
         self.setMinimumWidth(400)
 
         layout = QVBoxLayout(self)
+        layout.setSizeConstraint(QVBoxLayout.SizeConstraint.SetFixedSize)
 
         tabs = QTabWidget()
         layout.addWidget(tabs)
@@ -606,6 +607,7 @@ class AboutDialog(QDialog):
             build_time = "unknown"
 
         layout = QVBoxLayout(self)
+        layout.setSizeConstraint(QVBoxLayout.SizeConstraint.SetFixedSize)
         layout.setContentsMargins(20, 20, 20, 20)
         layout.setSpacing(12)
 
