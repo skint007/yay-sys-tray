@@ -24,6 +24,7 @@ class AppConfig:
     terminal: str = ""
     noconfirm: bool = False
     autostart: bool = False
+    animations: bool = True
     # Tailscale remote checking
     tailscale_enabled: bool = False
     tailscale_tags: str = "tag:server,tag:arch"

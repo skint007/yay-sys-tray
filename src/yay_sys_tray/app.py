@@ -82,6 +82,10 @@ class TrayApp(QObject):
         self.action_settings.triggered.connect(self.show_settings_dialog)
         self.menu.addAction(self.action_settings)
 
+        self.action_about = QAction("About")
+        self.action_about.triggered.connect(self.show_about_dialog)
+        self.menu.addAction(self.action_about)
+
         self.action_quit = QAction("Quit")
         self.action_quit.triggered.connect(QApplication.quit)
         self.menu.addAction(self.action_quit)
@@ -125,6 +129,9 @@ class TrayApp(QObject):
     # -- Spin animation (checking) --
 
     def _start_spin(self):
+        if not self.config.animations:
+            self.tray.setIcon(self._spin_frames[0])
+            return
         self._spin_index = 0
         self.tray.setIcon(self._spin_frames[0])
         self._spin_timer.start(80)
@@ -139,6 +146,8 @@ class TrayApp(QObject):
     # -- Bounce animation (updates found) --
 
     def _start_bounce(self, icon: QIcon, interval: int = 250, ticks: int = 8):
+        if not self.config.animations:
+            return
         self._bounce_icon = icon
         self._bounce_small = create_bounce_icon(icon, 0.65)
         self._bounce_count = 0
@@ -359,6 +368,12 @@ class TrayApp(QObject):
 
     def _on_settings_dialog_closed(self):
         self._settings_dialog = None
+
+    def show_about_dialog(self):
+        from yay_sys_tray.dialogs import AboutDialog
+
+        dialog = AboutDialog()
+        dialog.exec()
 
     def _on_tray_activated(self, reason):
         if reason == QSystemTrayIcon.ActivationReason.Trigger:

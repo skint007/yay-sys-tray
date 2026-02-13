@@ -67,6 +67,10 @@ class SettingsDialog(QDialog):
         self.autostart_check.setChecked(config.autostart)
         general_layout.addRow("Autostart:", self.autostart_check)
 
+        self.animations_check = QCheckBox("Animate tray icon")
+        self.animations_check.setChecked(config.animations)
+        general_layout.addRow("Animations:", self.animations_check)
+
         tabs.addTab(general_widget, "General")
 
         # --- Tailscale Tab ---
@@ -109,6 +113,7 @@ class SettingsDialog(QDialog):
             terminal=self.terminal_edit.text().strip(),
             noconfirm=self.noconfirm_check.isChecked(),
             autostart=self.autostart_check.isChecked(),
+            animations=self.animations_check.isChecked(),
             tailscale_enabled=self.tailscale_enabled_check.isChecked(),
             tailscale_tags=self.tailscale_tags_edit.text().strip(),
             tailscale_timeout=self.tailscale_timeout_spin.value(),
@@ -578,3 +583,48 @@ class UpdatesDialog(QDialog):
         if self.on_update:
             self.on_update()
             self.close()
+
+
+class AboutDialog(QDialog):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("About Yay Update Checker")
+        self.setWindowIcon(create_app_icon())
+        self.setFixedWidth(320)
+
+        import os
+        from datetime import datetime
+
+        from yay_sys_tray import __version__
+
+        # Build time from the package file's mtime
+        pkg_file = os.path.dirname(__file__)
+        try:
+            mtime = os.path.getmtime(pkg_file)
+            build_time = datetime.fromtimestamp(mtime).strftime("%Y-%m-%d %H:%M")
+        except OSError:
+            build_time = "unknown"
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(20, 20, 20, 20)
+        layout.setSpacing(12)
+
+        title = QLabel("Yay Update Checker")
+        title_font = QFont()
+        title_font.setPointSize(title_font.pointSize() + 4)
+        title_font.setBold(True)
+        title.setFont(title_font)
+        title.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        layout.addWidget(title)
+
+        info = QLabel(
+            f"Version: {__version__}\n"
+            f"Built: {build_time}\n\n"
+            "A lightweight system tray update checker\nfor Arch Linux."
+        )
+        info.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        layout.addWidget(info)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok)
+        buttons.accepted.connect(self.accept)
+        layout.addWidget(buttons)
