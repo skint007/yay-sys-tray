@@ -2,8 +2,8 @@ from __future__ import annotations
 
 from typing import Callable
 
-from PyQt6.QtCore import QRectF, QSettings, QSize, Qt
-from PyQt6.QtGui import QColor, QFont, QPainter, QPainterPath, QPen
+from PyQt6.QtCore import QPointF, QRectF, QSettings, QSize, Qt, QUrl
+from PyQt6.QtGui import QColor, QDesktopServices, QFont, QPainter, QPainterPath, QPen
 from PyQt6.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -129,10 +129,18 @@ class UpdateItemDelegate(QStyledItemDelegate):
     CARD_PADDING = 10
     CARD_RADIUS = 8
     NAME_FONT_SIZE_DELTA = 1
+    ICON_SIZE = 18
+    ICON_GAP = 6
     OLD_DIFF_COLOR = QColor(220, 50, 47)
     NEW_DIFF_COLOR = QColor(38, 162, 105)
     RESTART_COLOR = QColor(244, 67, 54)
     RESTART_BG = QColor(244, 67, 54, 25)
+    REPO_COLORS: dict[str, QColor] = {
+        "core": QColor(66, 133, 244),
+        "extra": QColor(52, 168, 83),
+        "multilib": QColor(251, 188, 4),
+        "aur": QColor(171, 71, 188),
+    }
 
     def paint(self, painter: QPainter, option: QStyleOptionViewItem, index):
         data = index.data(Qt.ItemDataRole.UserRole)
@@ -216,27 +224,44 @@ class UpdateItemDelegate(QStyledItemDelegate):
             painter.setPen(option.palette.text().color())
         painter.drawText(int(x), int(y), int(w), 20, Qt.AlignmentFlag.AlignLeft, update.package)
 
+        # Badges after the package name
+        badge_font = QFont(option.font)
+        badge_font.setPointSize(badge_font.pointSize() - 2)
+        badge_font.setBold(True)
+        name_fm = painter.fontMetrics()
+        cursor_x = x + name_fm.horizontalAdvance(update.package) + 8
+        painter.setFont(badge_font)
+        badge_fm = painter.fontMetrics()
+
+        # Repository badge
+        if update.repository:
+            repo_text = update.repository
+            repo_w = badge_fm.horizontalAdvance(repo_text) + 8
+            repo_h = badge_fm.height() + 2
+            repo_rect = QRectF(cursor_x, y + 2, repo_w, repo_h)
+            repo_path = QPainterPath()
+            repo_path.addRoundedRect(repo_rect, 3, 3)
+            repo_color = self.REPO_COLORS.get(update.repository, QColor(128, 128, 128))
+            painter.fillPath(repo_path, QColor(repo_color.red(), repo_color.green(), repo_color.blue(), 25))
+            painter.setPen(repo_color)
+            painter.drawText(
+                int(cursor_x + 4), int(y + 2), int(repo_w), int(repo_h),
+                Qt.AlignmentFlag.AlignCenter, repo_text,
+            )
+            cursor_x += repo_w + 6
+
         # Restart badge
         if update.package in RESTART_PACKAGES:
-            fm = painter.fontMetrics()
-            name_width = fm.horizontalAdvance(update.package)
-            badge_font = QFont(option.font)
-            badge_font.setPointSize(badge_font.pointSize() - 2)
-            badge_font.setBold(True)
-            painter.setFont(badge_font)
-            badge_fm = painter.fontMetrics()
             badge_text = "restart"
             badge_w = badge_fm.horizontalAdvance(badge_text) + 8
             badge_h = badge_fm.height() + 2
-            badge_x = x + name_width + 8
-            badge_y = y + 2
-            badge_rect = QRectF(badge_x, badge_y, badge_w, badge_h)
+            badge_rect = QRectF(cursor_x, y + 2, badge_w, badge_h)
             badge_path = QPainterPath()
             badge_path.addRoundedRect(badge_rect, 3, 3)
             painter.fillPath(badge_path, self.RESTART_BG)
             painter.setPen(self.RESTART_COLOR)
             painter.drawText(
-                int(badge_x + 4), int(badge_y), int(badge_w), int(badge_h),
+                int(cursor_x + 4), int(y + 2), int(badge_w), int(badge_h),
                 Qt.AlignmentFlag.AlignCenter, badge_text,
             )
 
@@ -297,6 +322,39 @@ class UpdateItemDelegate(QStyledItemDelegate):
             )
             painter.drawText(int(vx), vy, int(w), vh, Qt.AlignmentFlag.AlignLeft, new_diff)
 
+        # Right-side icons (stacked from right: info, then link)
+        sz = self.ICON_SIZE
+        icon_y = card_rect.y() + (card_rect.height() - sz) / 2
+        right_edge = card_rect.right() - p
+
+        if update.description:
+            right_edge -= sz
+            info_rect = QRectF(right_edge, icon_y, sz, sz)
+            info_color = option.palette.placeholderText().color()
+            painter.setPen(QPen(info_color, 1.5))
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            painter.drawEllipse(info_rect)
+            info_font = QFont(option.font)
+            info_font.setPointSize(info_font.pointSize() - 1)
+            info_font.setItalic(True)
+            info_font.setBold(True)
+            painter.setFont(info_font)
+            painter.drawText(info_rect, Qt.AlignmentFlag.AlignCenter, "i")
+            right_edge -= self.ICON_GAP
+
+        if update.url:
+            right_edge -= sz
+            link_rect = QRectF(right_edge, icon_y, sz, sz)
+            link_color = option.palette.link().color()
+            painter.setPen(QPen(link_color, 1.5))
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            painter.drawEllipse(link_rect)
+            link_font = QFont(option.font)
+            link_font.setPointSize(link_font.pointSize())
+            link_font.setBold(True)
+            painter.setFont(link_font)
+            painter.drawText(link_rect, Qt.AlignmentFlag.AlignCenter, "\u2197")
+
         painter.restore()
 
     def sizeHint(self, option: QStyleOptionViewItem, index) -> QSize:
@@ -305,25 +363,81 @@ class UpdateItemDelegate(QStyledItemDelegate):
             return QSize(option.rect.width(), 32)
         return QSize(option.rect.width(), 58)
 
+    def link_hit_test(self, item_rect: QRectF, click_pos: QPointF, data: UpdateInfo) -> bool:
+        """Return True if click_pos lands on the link icon for this item."""
+        if not data.url:
+            return False
+        m = self.CARD_MARGIN
+        p = self.CARD_PADDING
+        sz = self.ICON_SIZE
+        card_rect = QRectF(
+            item_rect.x() + m, item_rect.y() + m,
+            item_rect.width() - 2 * m, item_rect.height() - 2 * m,
+        )
+        right_edge = card_rect.right() - p
+        if data.description:
+            right_edge -= sz + self.ICON_GAP
+        right_edge -= sz
+        icon_y = card_rect.y() + (card_rect.height() - sz) / 2
+        link_rect = QRectF(right_edge, icon_y, sz, sz)
+        return link_rect.contains(click_pos)
 
-def _make_update_list(updates: list[UpdateInfo], parent: QWidget) -> QListWidget:
+
+class _ClickableUpdateList(QListWidget):
+    """QListWidget that opens package URLs when the link icon is clicked."""
+
+    def mouseReleaseEvent(self, event):
+        pos = event.position().toPoint()
+        index = self.indexAt(pos)
+        if index.isValid():
+            data = index.data(Qt.ItemDataRole.UserRole)
+            if isinstance(data, UpdateInfo) and data.url:
+                delegate = self.itemDelegate()
+                if isinstance(delegate, UpdateItemDelegate):
+                    rect = QRectF(self.visualRect(index))
+                    if delegate.link_hit_test(rect, event.position(), data):
+                        QDesktopServices.openUrl(QUrl(data.url))
+                        return
+        super().mouseReleaseEvent(event)
+
+    def mouseMoveEvent(self, event):
+        pos = event.position().toPoint()
+        index = self.indexAt(pos)
+        if index.isValid():
+            data = index.data(Qt.ItemDataRole.UserRole)
+            if isinstance(data, UpdateInfo) and data.url:
+                delegate = self.itemDelegate()
+                if isinstance(delegate, UpdateItemDelegate):
+                    rect = QRectF(self.visualRect(index))
+                    if delegate.link_hit_test(rect, event.position(), data):
+                        self.setCursor(Qt.CursorShape.PointingHandCursor)
+                        super().mouseMoveEvent(event)
+                        return
+        self.setCursor(Qt.CursorShape.ArrowCursor)
+        super().mouseMoveEvent(event)
+
+
+def _make_update_list(updates: list[UpdateInfo], parent: QWidget) -> _ClickableUpdateList:
     """Create a styled QListWidget populated with update cards."""
     sorted_updates = sorted(
         updates,
         key=lambda u: (u.package not in RESTART_PACKAGES, u.package.lower()),
     )
-    lw = QListWidget(parent)
+    lw = _ClickableUpdateList(parent)
     lw.setItemDelegate(UpdateItemDelegate(lw))
-    lw.setSelectionMode(QListWidget.SelectionMode.NoSelection)
+    lw.setSelectionMode(_ClickableUpdateList.SelectionMode.NoSelection)
     lw.setFocusPolicy(Qt.FocusPolicy.NoFocus)
     lw.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-    lw.setResizeMode(QListWidget.ResizeMode.Adjust)
+    lw.setResizeMode(_ClickableUpdateList.ResizeMode.Adjust)
+    lw.setMouseTracking(True)
     lw.setStyleSheet("QListWidget { background: transparent; border: none; }")
     lw.setSpacing(2)
     for update in sorted_updates:
         item = QListWidgetItem()
         item.setData(Qt.ItemDataRole.UserRole, update)
         item.setSizeHint(QSize(0, 58))
+        if update.description:
+            item.setToolTip(update.description)
         lw.addItem(item)
     return lw
 
