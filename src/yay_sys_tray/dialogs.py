@@ -72,6 +72,12 @@ class SettingsDialog(QDialog):
         self.animations_check.setChecked(config.animations)
         general_layout.addRow("Animations:", self.animations_check)
 
+        self.recheck_spin = QSpinBox()
+        self.recheck_spin.setRange(1, 60)
+        self.recheck_spin.setSuffix(" minutes")
+        self.recheck_spin.setValue(config.recheck_interval_minutes)
+        general_layout.addRow("Re-check cooldown:", self.recheck_spin)
+
         tabs.addTab(general_widget, "General")
 
         # --- Tailscale Tab ---
@@ -115,6 +121,7 @@ class SettingsDialog(QDialog):
             noconfirm=self.noconfirm_check.isChecked(),
             autostart=self.autostart_check.isChecked(),
             animations=self.animations_check.isChecked(),
+            recheck_interval_minutes=self.recheck_spin.value(),
             tailscale_enabled=self.tailscale_enabled_check.isChecked(),
             tailscale_tags=self.tailscale_tags_edit.text().strip(),
             tailscale_timeout=self.tailscale_timeout_spin.value(),
@@ -469,11 +476,13 @@ class UpdatesDialog(QDialog):
         self,
         updates: list[UpdateInfo],
         remote_hosts: list | None = None,
-        on_update: Callable[[], None] | None = None,
+        on_update: Callable[[bool], None] | None = None,
+        on_remote_update: Callable[[str, bool], None] | None = None,
         parent=None,
     ):
         super().__init__(parent)
         self.on_update = on_update
+        self._local_needs_restart = False
 
         remote_hosts = remote_hosts or []
         total = len(updates) + sum(len(h.updates) for h in remote_hosts)
@@ -495,7 +504,8 @@ class UpdatesDialog(QDialog):
             local_needs_restart = any(u.package in RESTART_PACKAGES for u in updates)
             tabs = QTabWidget()
 
-            local_tab = self._build_tab(updates, local_needs_restart, on_update)
+            local_cb = (lambda r=local_needs_restart: on_update(r)) if on_update else None
+            local_tab = self._build_tab(updates, local_needs_restart, local_cb)
             local_label = f"Local ({len(updates)})"
             tabs.addTab(local_tab, local_label)
             if local_needs_restart:
@@ -512,7 +522,10 @@ class UpdatesDialog(QDialog):
                     tab_label = f"{host.hostname} (error)"
                     tabs.addTab(error_widget, tab_label)
                 else:
-                    tab = self._build_tab(host.updates, host.needs_restart)
+                    remote_cb = None
+                    if on_remote_update:
+                        remote_cb = lambda _h=host.hostname, _r=host.needs_restart: on_remote_update(_h, _r)
+                    tab = self._build_tab(host.updates, host.needs_restart, remote_cb)
                     tab_label = f"{host.hostname} ({len(host.updates)})"
                     idx = tabs.addTab(tab, tab_label)
                     if host.needs_restart:
@@ -528,6 +541,7 @@ class UpdatesDialog(QDialog):
         else:
             # Single list, no tabs needed
             needs_restart = any(u.package in RESTART_PACKAGES for u in updates)
+            self._local_needs_restart = needs_restart
             if needs_restart:
                 layout.addWidget(_make_restart_banner())
             layout.addWidget(_make_update_list(updates, self))
@@ -536,7 +550,8 @@ class UpdatesDialog(QDialog):
         btn_layout.addStretch()
 
         if on_update and not has_remote:
-            update_btn = QPushButton("Update Now")
+            label = "Update Now & Restart" if self._local_needs_restart else "Update Now"
+            update_btn = QPushButton(label)
             update_btn.clicked.connect(self._launch_update)
             btn_layout.addWidget(update_btn)
 
@@ -564,7 +579,8 @@ class UpdatesDialog(QDialog):
         if on_update:
             btn_row = QHBoxLayout()
             btn_row.addStretch()
-            update_btn = QPushButton("Update Now")
+            label = "Update Now & Restart" if needs_restart else "Update Now"
+            update_btn = QPushButton(label)
             update_btn.clicked.connect(lambda: self._do_update(on_update))
             btn_row.addWidget(update_btn)
             tab_layout.addLayout(btn_row)
@@ -578,11 +594,10 @@ class UpdatesDialog(QDialog):
 
     def _do_update(self, callback: Callable[[], None]):
         callback()
-        self.close()
 
     def _launch_update(self):
         if self.on_update:
-            self.on_update()
+            self.on_update(self._local_needs_restart)
             self.close()
 
 
