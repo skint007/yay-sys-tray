@@ -25,6 +25,7 @@ class AppConfig:
     noconfirm: bool = False
     autostart: bool = False
     animations: bool = True
+    recheck_interval_minutes: int = 5
     # Tailscale remote checking
     tailscale_enabled: bool = False
     tailscale_tags: str = "tag:server,tag:arch"

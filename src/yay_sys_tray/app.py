@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from PyQt6.QtCore import QObject, QProcess, Qt, QTimer
 from PyQt6.QtGui import QAction, QIcon
@@ -309,14 +309,37 @@ class TrayApp(QObject):
         )
 
     def launch_update(self):
+        self._run_local_update(restart=False)
+
+    def _run_local_update(self, restart: bool = False):
         terminal = self.config.terminal
-        yay_cmd = ["yay", "-Syu"]
-        if self.config.noconfirm:
-            yay_cmd.append("--noconfirm")
+        if restart:
+            cmd = "yay -Syu"
+            if self.config.noconfirm:
+                cmd += " --noconfirm"
+            cmd += " && sudo reboot"
+            yay_cmd = ["bash", "-c", cmd]
+        else:
+            yay_cmd = ["yay", "-Syu"]
+            if self.config.noconfirm:
+                yay_cmd.append("--noconfirm")
         prefix = TERMINAL_CMDS.get(terminal, [terminal, "-e"])
         self.update_process = QProcess(self)
         self.update_process.finished.connect(self._on_update_finished)
         self.update_process.start(prefix[0], prefix[1:] + yay_cmd)
+
+    def _run_remote_update(self, hostname: str, restart: bool = False):
+        terminal = self.config.terminal
+        cmd = "sudo pacman -Syu"
+        if self.config.noconfirm:
+            cmd += " --noconfirm"
+        if restart:
+            cmd += " && sudo reboot"
+        ssh_cmd = ["ssh", hostname, cmd]
+        prefix = TERMINAL_CMDS.get(terminal, [terminal, "-e"])
+        self.update_process = QProcess(self)
+        self.update_process.finished.connect(self._on_update_finished)
+        self.update_process.start(prefix[0], prefix[1:] + ssh_cmd)
 
     def _on_update_finished(self):
         self.update_process = None
@@ -329,7 +352,8 @@ class TrayApp(QObject):
             return
 
         self._open_updates_dialog()
-        self.start_check()
+        if self._should_recheck():
+            self.start_check()
 
     def _open_updates_dialog(self):
         from yay_sys_tray.dialogs import UpdatesDialog
@@ -337,7 +361,8 @@ class TrayApp(QObject):
         self._updates_dialog = UpdatesDialog(
             self.updates,
             remote_hosts=self.remote_updates,
-            on_update=self.launch_update,
+            on_update=self._run_local_update,
+            on_remote_update=self._run_remote_update,
         )
         self._updates_dialog.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
         self._updates_dialog.destroyed.connect(self._on_updates_dialog_closed)
@@ -382,8 +407,14 @@ class TrayApp(QObject):
             )
             if has_updates:
                 self.show_updates_dialog()
-            else:
+            elif self._should_recheck():
                 self.start_check()
+
+    def _should_recheck(self) -> bool:
+        if self.last_check_time is None:
+            return True
+        elapsed = datetime.now() - self.last_check_time
+        return elapsed >= timedelta(minutes=self.config.recheck_interval_minutes)
 
     def _format_time(self) -> str:
         if self.last_check_time:
