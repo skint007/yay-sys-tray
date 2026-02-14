@@ -485,8 +485,9 @@ class UpdatesDialog(QDialog):
         self._local_needs_restart = False
 
         remote_hosts = remote_hosts or []
-        total = len(updates) + sum(len(h.updates) for h in remote_hosts)
-        has_remote = any(h.updates or h.error for h in remote_hosts)
+        remote_with_updates = [h for h in remote_hosts if h.updates]
+        total = len(updates) + sum(len(h.updates) for h in remote_with_updates)
+        use_tabs = len(remote_with_updates) > 0
 
         self.setWindowTitle(f"Available Updates ({total})")
         self.setWindowIcon(create_app_icon())
@@ -499,37 +500,28 @@ class UpdatesDialog(QDialog):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(8, 8, 8, 8)
 
-        if has_remote:
-            # Tabbed view: one tab per host
-            local_needs_restart = any(u.package in RESTART_PACKAGES for u in updates)
+        if use_tabs:
+            # Tabbed view: one tab per system with updates
             tabs = QTabWidget()
 
-            local_cb = (lambda r=local_needs_restart: on_update(r)) if on_update else None
-            local_tab = self._build_tab(updates, local_needs_restart, local_cb)
-            local_label = f"Local ({len(updates)})"
-            tabs.addTab(local_tab, local_label)
-            if local_needs_restart:
-                tabs.setTabToolTip(0, "Restart required")
+            if updates:
+                local_needs_restart = any(u.package in RESTART_PACKAGES for u in updates)
+                local_cb = (lambda r=local_needs_restart: on_update(r)) if on_update else None
+                local_tab = self._build_tab(updates, local_needs_restart, local_cb)
+                local_label = f"Local ({len(updates)})"
+                idx = tabs.addTab(local_tab, local_label)
+                if local_needs_restart:
+                    tabs.setTabToolTip(idx, "Restart required")
 
-            for host in remote_hosts:
-                if host.error:
-                    error_widget = QWidget()
-                    error_layout = QVBoxLayout(error_widget)
-                    error_layout.addWidget(
-                        QLabel(f"Could not reach {host.hostname}: {host.error}"),
-                    )
-                    error_layout.addStretch()
-                    tab_label = f"{host.hostname} (error)"
-                    tabs.addTab(error_widget, tab_label)
-                else:
-                    remote_cb = None
-                    if on_remote_update:
-                        remote_cb = lambda _h=host.hostname, _r=host.needs_restart: on_remote_update(_h, _r)
-                    tab = self._build_tab(host.updates, host.needs_restart, remote_cb)
-                    tab_label = f"{host.hostname} ({len(host.updates)})"
-                    idx = tabs.addTab(tab, tab_label)
-                    if host.needs_restart:
-                        tabs.setTabToolTip(idx, "Restart required")
+            for host in remote_with_updates:
+                remote_cb = None
+                if on_remote_update:
+                    remote_cb = lambda _h=host.hostname, _r=host.needs_restart: on_remote_update(_h, _r)
+                tab = self._build_tab(host.updates, host.needs_restart, remote_cb)
+                tab_label = f"{host.hostname} ({len(host.updates)})"
+                idx = tabs.addTab(tab, tab_label)
+                if host.needs_restart:
+                    tabs.setTabToolTip(idx, "Restart required")
 
             # Style tabs that need restart with red text
             for i in range(tabs.count()):
@@ -549,8 +541,8 @@ class UpdatesDialog(QDialog):
         btn_layout = QHBoxLayout()
         btn_layout.addStretch()
 
-        if on_update and not has_remote:
-            label = "Update Now & Restart" if self._local_needs_restart else "Update Now"
+        if on_update and not use_tabs:
+            label = "Update Now && Restart" if self._local_needs_restart else "Update Now"
             update_btn = QPushButton(label)
             update_btn.clicked.connect(self._launch_update)
             btn_layout.addWidget(update_btn)
@@ -579,7 +571,7 @@ class UpdatesDialog(QDialog):
         if on_update:
             btn_row = QHBoxLayout()
             btn_row.addStretch()
-            label = "Update Now & Restart" if needs_restart else "Update Now"
+            label = "Update Now && Restart" if needs_restart else "Update Now"
             update_btn = QPushButton(label)
             update_btn.clicked.connect(lambda: self._do_update(on_update))
             btn_row.addWidget(update_btn)
