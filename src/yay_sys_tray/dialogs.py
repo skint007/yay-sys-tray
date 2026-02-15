@@ -2,8 +2,9 @@ from __future__ import annotations
 
 from typing import Callable
 
-from PyQt6.QtCore import QPointF, QRectF, QSettings, QSize, Qt, QUrl
+from PyQt6.QtCore import QEvent, QPointF, QRectF, QSettings, QSize, Qt, QUrl
 from PyQt6.QtGui import QColor, QDesktopServices, QFont, QPainter, QPainterPath, QPen
+from PyQt6.QtWidgets import QToolTip
 from PyQt6.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -20,6 +21,7 @@ from PyQt6.QtWidgets import (
     QStyledItemDelegate,
     QStyleOptionViewItem,
     QTabWidget,
+    QTextEdit,
     QVBoxLayout,
     QWidget,
 )
@@ -335,38 +337,37 @@ class UpdateItemDelegate(QStyledItemDelegate):
             )
             painter.drawText(int(vx), vy, int(w), vh, Qt.AlignmentFlag.AlignLeft, new_diff)
 
-        # Right-side icons (stacked from right: info, then link)
-        sz = self.ICON_SIZE
-        icon_y = card_rect.y() + (card_rect.height() - sz) / 2
-        right_edge = card_rect.right() - p
+        # Right-side icons
+        icons = self._icon_positions(card_rect, update)
+        icon_color = option.palette.placeholderText().color()
+        painter.setBrush(Qt.BrushStyle.NoBrush)
 
-        if update.description:
-            right_edge -= sz
-            info_rect = QRectF(right_edge, icon_y, sz, sz)
-            info_color = option.palette.placeholderText().color()
-            painter.setPen(QPen(info_color, 1.5))
-            painter.setBrush(Qt.BrushStyle.NoBrush)
-            painter.drawEllipse(info_rect)
+        if "info" in icons:
+            painter.setPen(QPen(QColor(66, 133, 244), 1.5))
+            painter.drawEllipse(icons["info"])
             info_font = QFont(option.font)
             info_font.setPointSize(info_font.pointSize() - 1)
             info_font.setItalic(True)
             info_font.setBold(True)
             painter.setFont(info_font)
-            painter.drawText(info_rect, Qt.AlignmentFlag.AlignCenter, "i")
-            right_edge -= self.ICON_GAP
+            painter.drawText(icons["info"], Qt.AlignmentFlag.AlignCenter, "i")
 
-        if update.url:
-            right_edge -= sz
-            link_rect = QRectF(right_edge, icon_y, sz, sz)
-            link_color = option.palette.link().color()
-            painter.setPen(QPen(link_color, 1.5))
-            painter.setBrush(Qt.BrushStyle.NoBrush)
-            painter.drawEllipse(link_rect)
+        if "link" in icons:
+            painter.setPen(QPen(option.palette.link().color(), 1.5))
+            painter.drawEllipse(icons["link"])
             link_font = QFont(option.font)
-            link_font.setPointSize(link_font.pointSize())
             link_font.setBold(True)
             painter.setFont(link_font)
-            painter.drawText(link_rect, Qt.AlignmentFlag.AlignCenter, "\u2197")
+            painter.drawText(icons["link"], Qt.AlignmentFlag.AlignCenter, "\u2197")
+
+        dep_font = QFont(option.font)
+        dep_font.setBold(True)
+        painter.setFont(dep_font)
+        painter.setPen(QPen(icon_color, 1.5))
+        painter.drawEllipse(icons["rdeps"])
+        painter.drawText(icons["rdeps"], Qt.AlignmentFlag.AlignCenter, "\u2191")
+        painter.drawEllipse(icons["deps"])
+        painter.drawText(icons["deps"], Qt.AlignmentFlag.AlignCenter, "\u2193")
 
         painter.restore()
 
@@ -376,40 +377,99 @@ class UpdateItemDelegate(QStyledItemDelegate):
             return QSize(option.rect.width(), 32)
         return QSize(option.rect.width(), 58)
 
-    def link_hit_test(self, item_rect: QRectF, click_pos: QPointF, data: UpdateInfo) -> bool:
-        """Return True if click_pos lands on the link icon for this item."""
-        if not data.url:
-            return False
-        m = self.CARD_MARGIN
-        p = self.CARD_PADDING
+    def _icon_positions(self, card_rect: QRectF, data: UpdateInfo) -> dict[str, QRectF]:
+        """Compute positions of all right-side icons."""
         sz = self.ICON_SIZE
+        p = self.CARD_PADDING
+        icon_y = card_rect.y() + (card_rect.height() - sz) / 2
+        right_edge = card_rect.right() - p
+        positions: dict[str, QRectF] = {}
+
+        if data.description:
+            right_edge -= sz
+            positions["info"] = QRectF(right_edge, icon_y, sz, sz)
+            right_edge -= self.ICON_GAP
+
+        if data.url:
+            right_edge -= sz
+            positions["link"] = QRectF(right_edge, icon_y, sz, sz)
+            right_edge -= self.ICON_GAP
+
+        right_edge -= sz
+        positions["rdeps"] = QRectF(right_edge, icon_y, sz, sz)
+        right_edge -= self.ICON_GAP
+
+        right_edge -= sz
+        positions["deps"] = QRectF(right_edge, icon_y, sz, sz)
+
+        return positions
+
+    ICON_TOOLTIPS = {
+        "info": None,  # uses package description
+        "link": "Open package page",
+        "rdeps": "Show what depends on this",
+        "deps": "Show dependencies",
+    }
+
+    def helpEvent(self, event, view, option, index):
+        if event.type() == QEvent.Type.ToolTip:
+            data = index.data(Qt.ItemDataRole.UserRole)
+            if isinstance(data, UpdateInfo):
+                m = self.CARD_MARGIN
+                card_rect = QRectF(
+                    option.rect.x() + m, option.rect.y() + m,
+                    option.rect.width() - 2 * m, option.rect.height() - 2 * m,
+                )
+                icons = self._icon_positions(card_rect, data)
+                pos = QPointF(event.pos())
+                for name, rect in icons.items():
+                    if rect.contains(pos):
+                        if name == "info":
+                            tip = data.description
+                        else:
+                            tip = self.ICON_TOOLTIPS.get(name, "")
+                        if tip:
+                            QToolTip.showText(event.globalPos(), tip, view)
+                            return True
+                QToolTip.hideText()
+                return True
+        return super().helpEvent(event, view, option, index)
+
+    def icon_hit_test(self, item_rect: QRectF, click_pos: QPointF, data: UpdateInfo) -> str | None:
+        """Return the icon name ('link', 'deps', 'rdeps') if clicked, or None."""
+        m = self.CARD_MARGIN
         card_rect = QRectF(
             item_rect.x() + m, item_rect.y() + m,
             item_rect.width() - 2 * m, item_rect.height() - 2 * m,
         )
-        right_edge = card_rect.right() - p
-        if data.description:
-            right_edge -= sz + self.ICON_GAP
-        right_edge -= sz
-        icon_y = card_rect.y() + (card_rect.height() - sz) / 2
-        link_rect = QRectF(right_edge, icon_y, sz, sz)
-        return link_rect.contains(click_pos)
+        icons = self._icon_positions(card_rect, data)
+        for name in ("link", "deps", "rdeps"):
+            if name in icons and icons[name].contains(click_pos):
+                return name
+        return None
 
 
 class _ClickableUpdateList(QListWidget):
-    """QListWidget that opens package URLs when the link icon is clicked."""
+    """QListWidget that handles icon clicks on update cards."""
 
     def mouseReleaseEvent(self, event):
         pos = event.position().toPoint()
         index = self.indexAt(pos)
         if index.isValid():
             data = index.data(Qt.ItemDataRole.UserRole)
-            if isinstance(data, UpdateInfo) and data.url:
+            if isinstance(data, UpdateInfo):
                 delegate = self.itemDelegate()
                 if isinstance(delegate, UpdateItemDelegate):
                     rect = QRectF(self.visualRect(index))
-                    if delegate.link_hit_test(rect, event.position(), data):
+                    icon = delegate.icon_hit_test(rect, event.position(), data)
+                    if icon == "link" and data.url:
                         QDesktopServices.openUrl(QUrl(data.url))
+                        return
+                    if icon == "deps":
+                        DependencyTreeDialog(data.package, reverse=False, parent=self).exec()
+                        return
+                    if icon == "rdeps":
+                        DependencyTreeDialog(data.package, reverse=True, parent=self).exec()
                         return
         super().mouseReleaseEvent(event)
 
@@ -418,11 +478,11 @@ class _ClickableUpdateList(QListWidget):
         index = self.indexAt(pos)
         if index.isValid():
             data = index.data(Qt.ItemDataRole.UserRole)
-            if isinstance(data, UpdateInfo) and data.url:
+            if isinstance(data, UpdateInfo):
                 delegate = self.itemDelegate()
                 if isinstance(delegate, UpdateItemDelegate):
                     rect = QRectF(self.visualRect(index))
-                    if delegate.link_hit_test(rect, event.position(), data):
+                    if delegate.icon_hit_test(rect, event.position(), data):
                         self.setCursor(Qt.CursorShape.PointingHandCursor)
                         super().mouseMoveEvent(event)
                         return
@@ -449,10 +509,64 @@ def _make_update_list(updates: list[UpdateInfo], parent: QWidget) -> _ClickableU
         item = QListWidgetItem()
         item.setData(Qt.ItemDataRole.UserRole, update)
         item.setSizeHint(QSize(0, 58))
-        if update.description:
-            item.setToolTip(update.description)
         lw.addItem(item)
     return lw
+
+
+class DependencyTreeDialog(QDialog):
+    """Show the output of pactree for a package."""
+
+    def __init__(self, package: str, reverse: bool = False, parent=None):
+        import subprocess
+
+        super().__init__(parent)
+        self._settings_key = "rdeps_dialog/size" if reverse else "deps_dialog/size"
+
+        if reverse:
+            self.setWindowTitle(f"Required by: {package}")
+            cmd = ["pactree", "-r", package]
+        else:
+            self.setWindowTitle(f"Dependencies: {package}")
+            cmd = ["pactree", package]
+
+        self.setWindowIcon(create_app_icon())
+        self.setMinimumSize(400, 300)
+
+        settings = QSettings("yay-sys-tray", "yay-sys-tray")
+        if settings.contains(self._settings_key):
+            self.resize(settings.value(self._settings_key))
+
+        layout = QVBoxLayout(self)
+
+        text = QTextEdit()
+        text.setReadOnly(True)
+        text.setFont(QFont("monospace", 10))
+
+        try:
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
+            if result.returncode == 0:
+                text.setPlainText(result.stdout.rstrip())
+            else:
+                text.setPlainText(result.stderr.strip() or "No results.")
+        except FileNotFoundError:
+            text.setPlainText(
+                "pactree not found.\n"
+                "Install pacman-contrib:\n"
+                "  sudo pacman -S pacman-contrib"
+            )
+        except subprocess.TimeoutExpired:
+            text.setPlainText("Command timed out.")
+
+        layout.addWidget(text)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok)
+        buttons.accepted.connect(self.accept)
+        layout.addWidget(buttons)
+
+    def done(self, result):
+        settings = QSettings("yay-sys-tray", "yay-sys-tray")
+        settings.setValue(self._settings_key, self.size())
+        super().done(result)
 
 
 def _make_restart_banner() -> QLabel:
