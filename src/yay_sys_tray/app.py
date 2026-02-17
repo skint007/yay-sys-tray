@@ -190,7 +190,7 @@ class TrayApp(QObject):
 
         # Chain remote check if Tailscale is enabled
         if self.config.tailscale_enabled:
-            tags = [t.strip() for t in self.config.tailscale_tags.split(",") if t.strip()]
+            tags = [f"tag:{t.strip()}" for t in self.config.tailscale_tags.split(",") if t.strip()]
             if tags:
                 self.tailscale_checker = TailscaleChecker(tags, self.config.tailscale_timeout)
                 self.tailscale_checker.check_complete.connect(self._on_remote_check_complete)
