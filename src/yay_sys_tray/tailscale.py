@@ -29,6 +29,31 @@ class RemoteCheckResult:
     hosts: list[HostResult]
 
 
+def discover_all_tags() -> list[str]:
+    """Get all unique tag names (without 'tag:' prefix) from Tailscale peers."""
+    try:
+        result = subprocess.run(
+            ["tailscale", "status", "--json"],
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+        if result.returncode != 0:
+            return []
+        data = json.loads(result.stdout)
+        peers = data.get("Peer", {})
+        tags: set[str] = set()
+        for peer in peers.values():
+            for tag in peer.get("Tags") or []:
+                if tag.startswith("tag:"):
+                    tags.add(tag[4:])
+                else:
+                    tags.add(tag)
+        return sorted(tags)
+    except Exception:
+        return []
+
+
 def discover_peers(tags: list[str]) -> list[str]:
     """Get online Tailscale peers whose tags contain ALL specified tags."""
     result = subprocess.run(
