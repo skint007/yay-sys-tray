@@ -11,6 +11,11 @@ CONFIG_FILE = CONFIG_DIR / "config.json"
 SERVICE_NAME = "yay-sys-tray.service"
 
 
+def is_arch_linux() -> bool:
+    """Check if running on an Arch-based Linux distribution."""
+    return Path("/etc/arch-release").exists()
+
+
 def _detect_terminal() -> str:
     for term in ("kitty", "alacritty", "konsole", "xterm"):
         if shutil.which(term):
@@ -54,6 +59,8 @@ class AppConfig:
         CONFIG_FILE.write_text(json.dumps(asdict(self), indent=2) + "\n")
 
     def manage_autostart(self) -> None:
+        if not is_arch_linux():
+            return
         action = "enable" if self.autostart else "disable"
         subprocess.run(
             ["systemctl", "--user", action, SERVICE_NAME],
@@ -64,6 +71,8 @@ class AppConfig:
 
     def manage_passwordless_updates(self) -> bool:
         """Create or remove sudoers NOPASSWD rule for pacman. Returns True on success."""
+        if not is_arch_linux():
+            return False
         if self.passwordless_updates:
             username = getpass.getuser()
             rule = f"{username} ALL=(ALL) NOPASSWD: /usr/bin/pacman"
