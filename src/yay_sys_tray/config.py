@@ -1,3 +1,4 @@
+import getpass
 import json
 import shutil
 import subprocess
@@ -26,6 +27,7 @@ class AppConfig:
     autostart: bool = False
     animations: bool = True
     recheck_interval_minutes: int = 5
+    passwordless_updates: bool = False
     # Tailscale remote checking
     tailscale_enabled: bool = False
     tailscale_tags: str = "tag:server,tag:arch"
@@ -57,3 +59,26 @@ class AppConfig:
             ["systemctl", "--user", action, SERVICE_NAME],
             capture_output=True,
         )
+
+    SUDOERS_FILE = "/etc/sudoers.d/yay-sys-tray"
+
+    def manage_passwordless_updates(self) -> bool:
+        """Create or remove sudoers NOPASSWD rule for pacman. Returns True on success."""
+        if self.passwordless_updates:
+            username = getpass.getuser()
+            rule = f"{username} ALL=(ALL) NOPASSWD: /usr/bin/pacman"
+            result = subprocess.run(
+                [
+                    "pkexec", "bash", "-c",
+                    f'printf "%s\\n" "{rule}" > {self.SUDOERS_FILE}'
+                    f" && chmod 440 {self.SUDOERS_FILE}",
+                ],
+                capture_output=True,
+            )
+            return result.returncode == 0
+        else:
+            result = subprocess.run(
+                ["pkexec", "rm", "-f", self.SUDOERS_FILE],
+                capture_output=True,
+            )
+            return result.returncode == 0
