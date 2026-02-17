@@ -35,12 +35,19 @@ class AppConfig:
     passwordless_updates: bool = False
     # Tailscale remote checking
     tailscale_enabled: bool = False
-    tailscale_tags: str = "tag:server,tag:arch"
+    tailscale_tags: str = "server,arch"
     tailscale_timeout: int = 10
 
     def __post_init__(self):
         if not self.terminal:
             self.terminal = _detect_terminal()
+        # Migrate old "tag:server,tag:arch" format to "server,arch"
+        if "tag:" in self.tailscale_tags:
+            self.tailscale_tags = ",".join(
+                t.strip().removeprefix("tag:")
+                for t in self.tailscale_tags.split(",")
+                if t.strip()
+            )
 
     @classmethod
     def load(cls) -> "AppConfig":

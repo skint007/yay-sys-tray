@@ -13,6 +13,7 @@ from PyQt6.QtWidgets import (
     QFormLayout,
     QHBoxLayout,
     QLabel,
+    QLayout,
     QLineEdit,
     QListWidget,
     QListWidgetItem,
@@ -24,11 +25,138 @@ from PyQt6.QtWidgets import (
     QTextEdit,
     QVBoxLayout,
     QWidget,
+    QWidgetItem,
 )
 
 from yay_sys_tray.checker import RESTART_PACKAGES, UpdateInfo
 from yay_sys_tray.config import AppConfig
 from yay_sys_tray.icons import create_app_icon
+from yay_sys_tray.tailscale import discover_all_tags
+
+
+class FlowLayout(QLayout):
+    """Layout that arranges widgets left-to-right, wrapping to the next row."""
+
+    def __init__(self, parent=None, spacing: int = 6):
+        super().__init__(parent)
+        self._items: list[QWidgetItem] = []
+        self._spacing = spacing
+
+    def addItem(self, item):
+        self._items.append(item)
+
+    def count(self):
+        return len(self._items)
+
+    def itemAt(self, index):
+        if 0 <= index < len(self._items):
+            return self._items[index]
+        return None
+
+    def takeAt(self, index):
+        if 0 <= index < len(self._items):
+            return self._items.pop(index)
+        return None
+
+    def hasHeightForWidth(self):
+        return True
+
+    def heightForWidth(self, width):
+        return self._do_layout(QRectF(0, 0, width, 0), apply=False)
+
+    def setGeometry(self, rect):
+        super().setGeometry(rect)
+        self._do_layout(QRectF(rect), apply=True)
+
+    def sizeHint(self):
+        return self.minimumSize()
+
+    def minimumSize(self):
+        size = QSize(0, 0)
+        for item in self._items:
+            size = size.expandedTo(item.minimumSize())
+        m = self.contentsMargins()
+        return QSize(size.width() + m.left() + m.right(), size.height() + m.top() + m.bottom())
+
+    def _do_layout(self, rect: QRectF, apply: bool) -> int:
+        m = self.contentsMargins()
+        x = rect.x() + m.left()
+        y = rect.y() + m.top()
+        row_height = 0
+        right = rect.right() - m.right()
+
+        for item in self._items:
+            sz = item.sizeHint()
+            if x + sz.width() > right and row_height > 0:
+                x = rect.x() + m.left()
+                y += row_height + self._spacing
+                row_height = 0
+            if apply:
+                item.setGeometry(QRectF(x, y, sz.width(), sz.height()).toAlignedRect())
+            x += sz.width() + self._spacing
+            row_height = max(row_height, sz.height())
+
+        return int(y + row_height - rect.y() + m.bottom())
+
+
+PILL_STYLE = """
+QPushButton {{
+    border: 1px solid {border};
+    border-radius: 12px;
+    padding: 4px 12px;
+    background: {bg};
+    color: {fg};
+    font-weight: bold;
+    font-size: 12px;
+}}
+QPushButton:hover {{
+    background: {hover_bg};
+}}
+"""
+
+
+class TagPillWidget(QWidget):
+    """Displays Tailscale tags as toggleable pill buttons."""
+
+    def __init__(self, selected_tags: list[str], parent=None):
+        super().__init__(parent)
+        self._layout = FlowLayout(self, spacing=6)
+        self._buttons: dict[str, QPushButton] = {}
+
+        available = discover_all_tags()
+        all_tags = sorted(set(available) | set(selected_tags))
+
+        for tag in all_tags:
+            btn = QPushButton(tag)
+            btn.setCheckable(True)
+            btn.setChecked(tag in selected_tags)
+            btn.toggled.connect(lambda _, b=btn: self._update_style(b))
+            self._buttons[tag] = btn
+            self._layout.addWidget(btn)
+            self._update_style(btn)
+
+        if not all_tags:
+            label = QLabel("No tags found")
+            label.setStyleSheet("color: gray; font-style: italic;")
+            self._layout.addWidget(label)
+
+    def _update_style(self, btn: QPushButton):
+        if btn.isChecked():
+            btn.setStyleSheet(PILL_STYLE.format(
+                border="#4285F4", bg="#4285F4", fg="white", hover_bg="#5a9bff",
+            ))
+        else:
+            btn.setStyleSheet(PILL_STYLE.format(
+                border="#888", bg="transparent", fg="palette(text)", hover_bg="rgba(128,128,128,0.15)",
+            ))
+
+    def selected(self) -> list[str]:
+        return [tag for tag, btn in self._buttons.items() if btn.isChecked()]
+
+    def setEnabled(self, enabled: bool):
+        super().setEnabled(enabled)
+        for btn in self._buttons.values():
+            btn.setEnabled(enabled)
 
 
 class SettingsDialog(QDialog):
@@ -97,9 +225,9 @@ class SettingsDialog(QDialog):
         self.tailscale_enabled_check.setChecked(config.tailscale_enabled)
         tailscale_layout.addRow("Enable:", self.tailscale_enabled_check)
 
-        self.tailscale_tags_edit = QLineEdit(config.tailscale_tags)
-        self.tailscale_tags_edit.setPlaceholderText("tag:server,tag:arch")
-        tailscale_layout.addRow("Device tags:", self.tailscale_tags_edit)
+        selected = [t.strip() for t in config.tailscale_tags.split(",") if t.strip()]
+        self.tag_pills = TagPillWidget(selected)
+        tailscale_layout.addRow("Device tags:", self.tag_pills)
 
         self.tailscale_timeout_spin = QSpinBox()
         self.tailscale_timeout_spin.setRange(5, 60)
@@ -107,9 +235,9 @@ class SettingsDialog(QDialog):
         self.tailscale_timeout_spin.setValue(config.tailscale_timeout)
         tailscale_layout.addRow("SSH timeout:", self.tailscale_timeout_spin)
 
-        self.tailscale_enabled_check.toggled.connect(self.tailscale_tags_edit.setEnabled)
+        self.tailscale_enabled_check.toggled.connect(self.tag_pills.setEnabled)
         self.tailscale_enabled_check.toggled.connect(self.tailscale_timeout_spin.setEnabled)
-        self.tailscale_tags_edit.setEnabled(config.tailscale_enabled)
+        self.tag_pills.setEnabled(config.tailscale_enabled)
         self.tailscale_timeout_spin.setEnabled(config.tailscale_enabled)
 
         tabs.addTab(tailscale_widget, "Tailscale")
@@ -133,7 +261,7 @@ class SettingsDialog(QDialog):
             recheck_interval_minutes=self.recheck_spin.value(),
             passwordless_updates=self.passwordless_check.isChecked(),
             tailscale_enabled=self.tailscale_enabled_check.isChecked(),
-            tailscale_tags=self.tailscale_tags_edit.text().strip(),
+            tailscale_tags=",".join(self.tag_pills.selected()),
             tailscale_timeout=self.tailscale_timeout_spin.value(),
         )
 
