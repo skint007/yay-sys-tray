@@ -386,9 +386,14 @@ class TrayApp(QObject):
         self._settings_dialog.show()
 
     def _on_settings_accepted(self):
+        old_passwordless = self.config.passwordless_updates
         self.config = self._settings_dialog.get_config()
         self.config.save()
         self.config.manage_autostart()
+        if self.config.passwordless_updates != old_passwordless:
+            if not self.config.manage_passwordless_updates():
+                self.config.passwordless_updates = old_passwordless
+                self.config.save()
         self._restart_timer()
 
     def _on_settings_dialog_closed(self):

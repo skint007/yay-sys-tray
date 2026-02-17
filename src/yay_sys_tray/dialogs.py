@@ -80,6 +80,10 @@ class SettingsDialog(QDialog):
         self.recheck_spin.setValue(config.recheck_interval_minutes)
         general_layout.addRow("Re-check cooldown:", self.recheck_spin)
 
+        self.passwordless_check = QCheckBox("No sudo password for pacman")
+        self.passwordless_check.setChecked(config.passwordless_updates)
+        general_layout.addRow("Passwordless:", self.passwordless_check)
+
         tabs.addTab(general_widget, "General")
 
         # --- Tailscale Tab ---
@@ -124,6 +128,7 @@ class SettingsDialog(QDialog):
             autostart=self.autostart_check.isChecked(),
             animations=self.animations_check.isChecked(),
             recheck_interval_minutes=self.recheck_spin.value(),
+            passwordless_updates=self.passwordless_check.isChecked(),
             tailscale_enabled=self.tailscale_enabled_check.isChecked(),
             tailscale_tags=self.tailscale_tags_edit.text().strip(),
             tailscale_timeout=self.tailscale_timeout_spin.value(),
