@@ -5,7 +5,7 @@ from PyQt6.QtGui import QAction, QIcon
 from PyQt6.QtWidgets import QApplication, QMenu, QSystemTrayIcon
 
 from yay_sys_tray.checker import CheckResult, UpdateChecker, UpdateInfo
-from yay_sys_tray.config import AppConfig
+from yay_sys_tray.config import AppConfig, is_arch_linux
 from yay_sys_tray.icons import (
     create_bounce_icon,
     create_checking_frames,
@@ -30,6 +30,7 @@ class TrayApp(QObject):
     def __init__(self, config: AppConfig):
         super().__init__()
         self.config = config
+        self.is_arch = is_arch_linux()
         self.updates: list[UpdateInfo] = []
         self.local_result: CheckResult | None = None
         self.remote_updates: list[HostResult] = []
@@ -74,6 +75,7 @@ class TrayApp(QObject):
 
         self.action_update = QAction("Update System")
         self.action_update.triggered.connect(self.launch_update)
+        self.action_update.setEnabled(self.is_arch)
         self.menu.addAction(self.action_update)
 
         self.menu.addSeparator()
@@ -119,6 +121,15 @@ class TrayApp(QObject):
         self._old_count = len(self.updates) + sum(
             len(h.updates) for h in self.remote_updates
         )
+
+        if not self.is_arch:
+            # Skip local check; feed an empty result to chain into Tailscale
+            self._on_check_complete(
+                CheckResult(updates=[], needs_restart=False, restart_packages=[])
+            )
+            if self.tailscale_checker is None:
+                self.action_check.setEnabled(True)
+            return
 
         self.checker = UpdateChecker()
         self.checker.check_complete.connect(self._on_check_complete)
@@ -214,10 +225,11 @@ class TrayApp(QObject):
         # Build tooltip
         lines = []
         if self.remote_updates:
-            local_label = f"Local: {local_count} update(s)"
-            if result.needs_restart:
-                local_label += " (restart)"
-            lines.append(local_label)
+            if self.is_arch:
+                local_label = f"Local: {local_count} update(s)"
+                if result.needs_restart:
+                    local_label += " (restart)"
+                lines.append(local_label)
             for host in self.remote_updates:
                 if host.error:
                     lines.append(f"{host.hostname}: unreachable")
@@ -230,7 +242,10 @@ class TrayApp(QObject):
                     lines.append(f"{host.hostname}: up to date")
         else:
             if total_count == 0:
-                lines.append("System up to date")
+                if self.is_arch:
+                    lines.append("System up to date")
+                else:
+                    lines.append("Local checks disabled")
             else:
                 lines.append(f"{total_count} update(s) available")
                 if result.needs_restart:
@@ -361,7 +376,7 @@ class TrayApp(QObject):
         self._updates_dialog = UpdatesDialog(
             self.updates,
             remote_hosts=self.remote_updates,
-            on_update=self._run_local_update,
+            on_update=self._run_local_update if self.is_arch else None,
             on_remote_update=self._run_remote_update,
         )
         self._updates_dialog.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
@@ -379,7 +394,7 @@ class TrayApp(QObject):
             self._settings_dialog.activateWindow()
             return
 
-        self._settings_dialog = SettingsDialog(self.config)
+        self._settings_dialog = SettingsDialog(self.config, is_arch=self.is_arch)
         self._settings_dialog.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
         self._settings_dialog.accepted.connect(self._on_settings_accepted)
         self._settings_dialog.destroyed.connect(self._on_settings_dialog_closed)

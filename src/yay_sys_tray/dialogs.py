@@ -32,7 +32,7 @@ from yay_sys_tray.icons import create_app_icon
 
 
 class SettingsDialog(QDialog):
-    def __init__(self, config: AppConfig, parent=None):
+    def __init__(self, config: AppConfig, is_arch: bool = True, parent=None):
         super().__init__(parent)
         self.setWindowTitle("Yay Update Checker - Settings")
         self.setWindowIcon(create_app_icon())
@@ -63,11 +63,13 @@ class SettingsDialog(QDialog):
         general_layout.addRow("Terminal:", self.terminal_edit)
 
         self.noconfirm_check = QCheckBox("Skip confirmation prompts")
-        self.noconfirm_check.setChecked(config.noconfirm)
+        self.noconfirm_check.setChecked(config.noconfirm if is_arch else False)
+        self.noconfirm_check.setEnabled(is_arch)
         general_layout.addRow("--noconfirm:", self.noconfirm_check)
 
         self.autostart_check = QCheckBox("Start on login")
-        self.autostart_check.setChecked(config.autostart)
+        self.autostart_check.setChecked(config.autostart if is_arch else False)
+        self.autostart_check.setEnabled(is_arch)
         general_layout.addRow("Autostart:", self.autostart_check)
 
         self.animations_check = QCheckBox("Animate tray icon")
@@ -81,7 +83,8 @@ class SettingsDialog(QDialog):
         general_layout.addRow("Re-check cooldown:", self.recheck_spin)
 
         self.passwordless_check = QCheckBox("No sudo password for pacman")
-        self.passwordless_check.setChecked(config.passwordless_updates)
+        self.passwordless_check.setChecked(config.passwordless_updates if is_arch else False)
+        self.passwordless_check.setEnabled(is_arch)
         general_layout.addRow("Passwordless:", self.passwordless_check)
 
         tabs.addTab(general_widget, "General")
