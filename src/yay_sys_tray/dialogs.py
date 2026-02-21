@@ -159,6 +159,43 @@ class TagPillWidget(QWidget):
             btn.setEnabled(enabled)
 
 
+class DurationWidget(QWidget):
+    """Three-field dd : hh : mm duration input. Value is stored in total minutes."""
+
+    def __init__(self, minutes: int, parent=None):
+        super().__init__(parent)
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(2)
+
+        d, remainder = divmod(minutes, 24 * 60)
+        h, m = divmod(remainder, 60)
+
+        self._days = QSpinBox()
+        self._days.setRange(0, 99)
+        self._days.setValue(d)
+        self._days.setSuffix(" d")
+        self._days.setSpecialValueText("0 d")
+
+        self._hours = QSpinBox()
+        self._hours.setRange(0, 23)
+        self._hours.setValue(h)
+        self._hours.setSuffix(" h")
+
+        self._minutes = QSpinBox()
+        self._minutes.setRange(0, 59)
+        self._minutes.setValue(m)
+        self._minutes.setSuffix(" m")
+
+        layout.addWidget(self._days)
+        layout.addWidget(self._hours)
+        layout.addWidget(self._minutes)
+        layout.addStretch()
+
+    def value(self) -> int:
+        return (self._days.value() * 24 + self._hours.value()) * 60 + self._minutes.value()
+
+
 class SettingsDialog(QDialog):
     def __init__(self, config: AppConfig, is_arch: bool = True, parent=None):
         super().__init__(parent)
@@ -176,11 +213,8 @@ class SettingsDialog(QDialog):
         general_widget = QWidget()
         general_layout = QFormLayout(general_widget)
 
-        self.interval_spin = QSpinBox()
-        self.interval_spin.setRange(5, 1440)
-        self.interval_spin.setSuffix(" minutes")
-        self.interval_spin.setValue(config.check_interval_minutes)
-        general_layout.addRow("Check interval:", self.interval_spin)
+        self.interval_widget = DurationWidget(config.check_interval_minutes)
+        general_layout.addRow("Check interval:", self.interval_widget)
 
         self.notify_combo = QComboBox()
         self.notify_combo.addItems(["always", "new_only", "never"])
@@ -252,7 +286,7 @@ class SettingsDialog(QDialog):
 
     def get_config(self) -> AppConfig:
         return AppConfig(
-            check_interval_minutes=self.interval_spin.value(),
+            check_interval_minutes=max(5, self.interval_widget.value()),
             notify=self.notify_combo.currentText(),
             terminal=self.terminal_edit.text().strip(),
             noconfirm=self.noconfirm_check.isChecked(),
