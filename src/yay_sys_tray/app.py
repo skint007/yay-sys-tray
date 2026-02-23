@@ -250,7 +250,7 @@ class TrayApp(QObject):
                 lines.append(f"{total_count} update(s) available")
                 if result.needs_restart:
                     lines.append(f"Restart: {', '.join(result.restart_packages)}")
-        lines.append(f"Last check: {self._format_time()}")
+        lines.append(f"Last check: {self._format_time()}  |  Next: {self._format_next_check()}")
 
         # Set icon
         reboot = result.reboot_info
@@ -440,3 +440,15 @@ class TrayApp(QObject):
         if self.last_check_time:
             return self.last_check_time.strftime("%H:%M")
         return "never"
+
+    def _format_next_check(self) -> str:
+        if self.last_check_time:
+            next_time = self.last_check_time + timedelta(minutes=self.config.check_interval_minutes)
+            now = datetime.now()
+            if next_time.date() == now.date():
+                return next_time.strftime("%H:%M")
+            elif next_time.date() == (now + timedelta(days=1)).date():
+                return f"tomorrow {next_time.strftime('%H:%M')}"
+            else:
+                return next_time.strftime("%b %d %H:%M")
+        return "—"
