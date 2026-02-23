@@ -1,0 +1,46 @@
+name: Publish AUR Package
+
+# Fires on push to master (rolling) and on v* tags (clean version).
+# Required secrets: AUR_SSH_PRIVATE_KEY, AUR_EMAIL
+
+on:
+  push:
+    branches: [master]
+    tags: ['v*']
+
+jobs:
+  aur:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # needed for accurate git rev-list --count
+
+      - name: Compute pkgver
+        id: version
+        run: |
+          if git describe --exact-match --tags HEAD 2>/dev/null; then
+            PKGVER=$(git describe --exact-match --tags HEAD | sed 's/^v//')
+          else
+            PKGVER=$(git describe --tags --long --abbrev=7 2>/dev/null \
+              | sed 's/^v//;s/-0-g[0-9a-f]*$//;s/-\([0-9]*\)-g\([0-9a-f]*\)$/.\1.\2/' \
+              || printf 'r%s.%s' "$(git rev-list --count HEAD)" "$(git rev-parse --short=7 HEAD)")
+          fi
+          echo "pkgver=${PKGVER}" >> "$GITHUB_OUTPUT"
+
+      - name: Stamp pkgver into PKGBUILD
+        run: |
+          sed -i "s/^pkgver=.*/pkgver=${{ steps.version.outputs.pkgver }}/" aur/PKGBUILD
+
+      - name: Publish to AUR
+        uses: KSXGitHub/github-actions-deploy-aur@v3.0.1
+        with:
+          pkgname: yay-sys-tray-git
+          pkgbuild: ./aur/PKGBUILD
+          commit_username: skint007
+          commit_email: ${{ secrets.AUR_EMAIL }}
+          ssh_private_key: ${{ secrets.AUR_SSH_PRIVATE_KEY }}
+          commit_message: "Update to ${{ steps.version.outputs.pkgver }}"
+          force_push: true
+          allow_empty_commits: false
