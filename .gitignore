@@ -9,3 +9,4 @@ aur/src/
 aur/pkg/
 aur/*.tar.zst
 aur/yay-sys-tray/
+AUR.md
