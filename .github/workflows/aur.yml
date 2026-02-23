@@ -38,6 +38,7 @@ jobs:
         with:
           pkgname: yay-sys-tray-git
           pkgbuild: ./aur/PKGBUILD
+          assets: ./aur/*.install
           commit_username: skint007
           commit_email: ${{ secrets.AUR_EMAIL }}
           ssh_private_key: ${{ secrets.AUR_SSH_PRIVATE_KEY }}
