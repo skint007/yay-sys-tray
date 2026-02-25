@@ -82,19 +82,19 @@ def discover_peers(tags: list[str]) -> list[str]:
 
 
 def check_host(hostname: str, timeout: int) -> HostResult:
-    """SSH into a host and run pacman -Qu to check for updates."""
+    """SSH into a host and run checkupdates to check for updates."""
     try:
         ssh_opts = [
             "-o", f"ConnectTimeout={timeout}",
             *SSH_OPTS,
         ]
         result = subprocess.run(
-            ["ssh", *ssh_opts, hostname, "pacman -Qu"],
+            ["ssh", *ssh_opts, hostname, "checkupdates"],
             capture_output=True,
             text=True,
             timeout=timeout + 30,
         )
-        # pacman -Qu: exit 0 = updates, exit 1 = no updates
+        # checkupdates: exit 0 = updates, exit 2 = no updates, exit 1 = error
         if result.returncode == 0 and result.stdout.strip():
             updates = parse_update_output(result.stdout)
             restart_pkgs = [u.package for u in updates if u.package in RESTART_PACKAGES]

@@ -4,7 +4,7 @@ from typing import Callable
 
 from PyQt6.QtCore import QEvent, QPointF, QRectF, QSettings, QSize, Qt, QUrl
 from PyQt6.QtGui import QColor, QDesktopServices, QFont, QPainter, QPainterPath, QPen
-from PyQt6.QtWidgets import QToolTip
+from PyQt6.QtWidgets import QMenu, QToolTip
 from PyQt6.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -23,6 +23,7 @@ from PyQt6.QtWidgets import (
     QStyleOptionViewItem,
     QTabWidget,
     QTextEdit,
+    QToolButton,
     QVBoxLayout,
     QWidget,
     QWidgetItem,
@@ -790,7 +791,7 @@ class UpdatesDialog(QDialog):
 
             if updates:
                 local_needs_restart = any(u.package in RESTART_PACKAGES for u in updates)
-                local_cb = (lambda r=local_needs_restart: on_update(r)) if on_update else None
+                local_cb = on_update if on_update else None
                 local_tab = self._build_tab(updates, local_needs_restart, local_cb)
                 local_label = f"Local ({len(updates)})"
                 idx = tabs.addTab(local_tab, local_label)
@@ -800,7 +801,7 @@ class UpdatesDialog(QDialog):
             for host in remote_with_updates:
                 remote_cb = None
                 if on_remote_update:
-                    remote_cb = lambda _h=host.hostname, _r=host.needs_restart: on_remote_update(_h, _r)
+                    remote_cb = lambda restart, _h=host.hostname: on_remote_update(_h, restart)
                 tab = self._build_tab(host.updates, host.needs_restart, remote_cb)
                 tab_label = f"{host.hostname} ({len(host.updates)})"
                 idx = tabs.addTab(tab, tab_label)
@@ -826,10 +827,19 @@ class UpdatesDialog(QDialog):
         btn_layout.addStretch()
 
         if on_update and not use_tabs:
-            label = "Update Now && Restart" if self._local_needs_restart else "Update Now"
-            update_btn = QPushButton(label)
-            update_btn.clicked.connect(self._launch_update)
-            btn_layout.addWidget(update_btn)
+            if self._local_needs_restart:
+                split_btn = QToolButton()
+                split_btn.setText("Update && Restart")
+                split_btn.setPopupMode(QToolButton.ToolButtonPopupMode.MenuButtonPopup)
+                split_btn.clicked.connect(self._launch_update)
+                menu = QMenu(split_btn)
+                menu.addAction("Update Only (no restart)", self._launch_update_no_restart)
+                split_btn.setMenu(menu)
+                btn_layout.addWidget(split_btn)
+            else:
+                update_btn = QPushButton("Update Now")
+                update_btn.clicked.connect(self._launch_update)
+                btn_layout.addWidget(update_btn)
 
         close_btn = QPushButton("Close")
         close_btn.clicked.connect(self.close)
@@ -841,7 +851,7 @@ class UpdatesDialog(QDialog):
         self,
         updates: list[UpdateInfo],
         needs_restart: bool,
-        on_update: Callable[[], None] | None = None,
+        on_update: Callable[[bool], None] | None = None,
     ) -> QWidget:
         widget = QWidget()
         tab_layout = QVBoxLayout(widget)
@@ -855,10 +865,19 @@ class UpdatesDialog(QDialog):
         if on_update:
             btn_row = QHBoxLayout()
             btn_row.addStretch()
-            label = "Update Now && Restart" if needs_restart else "Update Now"
-            update_btn = QPushButton(label)
-            update_btn.clicked.connect(lambda: self._do_update(on_update))
-            btn_row.addWidget(update_btn)
+            if needs_restart:
+                split_btn = QToolButton()
+                split_btn.setText("Update && Restart")
+                split_btn.setPopupMode(QToolButton.ToolButtonPopupMode.MenuButtonPopup)
+                split_btn.clicked.connect(lambda: on_update(True))
+                menu = QMenu(split_btn)
+                menu.addAction("Update Only (no restart)", lambda: on_update(False))
+                split_btn.setMenu(menu)
+                btn_row.addWidget(split_btn)
+            else:
+                update_btn = QPushButton("Update Now")
+                update_btn.clicked.connect(lambda: on_update(False))
+                btn_row.addWidget(update_btn)
             tab_layout.addLayout(btn_row)
 
         return widget
@@ -868,12 +887,14 @@ class UpdatesDialog(QDialog):
         settings.setValue("updates_dialog/size", self.size())
         super().closeEvent(event)
 
-    def _do_update(self, callback: Callable[[], None]):
-        callback()
-
     def _launch_update(self):
         if self.on_update:
             self.on_update(self._local_needs_restart)
+            self.close()
+
+    def _launch_update_no_restart(self):
+        if self.on_update:
+            self.on_update(False)
             self.close()
 
 
