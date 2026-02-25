@@ -327,6 +327,9 @@ class TrayApp(QObject):
         self._run_local_update(restart=False)
 
     def _run_local_update(self, restart: bool = False):
+        self._self_update_pending = any(
+            u.package == "yay-sys-tray-git" for u in self.updates
+        )
         terminal = self.config.terminal
         if restart:
             cmd = "yay -Syu"
@@ -356,9 +359,32 @@ class TrayApp(QObject):
         self.update_process.finished.connect(self._on_update_finished)
         self.update_process.start(prefix[0], prefix[1:] + ssh_cmd)
 
+    def _run_remove(self, package: str, flags: str):
+        terminal = self.config.terminal
+        yay_cmd = ["yay", f"-{flags}", package]
+        if self.config.noconfirm:
+            yay_cmd.append("--noconfirm")
+        prefix = TERMINAL_CMDS.get(terminal, [terminal, "-e"])
+        self.update_process = QProcess(self)
+        self.update_process.finished.connect(self._on_update_finished)
+        self.update_process.start(prefix[0], prefix[1:] + yay_cmd)
+
     def _on_update_finished(self):
         self.update_process = None
+        if getattr(self, "_self_update_pending", False):
+            self._self_update_pending = False
+            self._restart_service()
+            return
         self.start_check()
+
+    def _restart_service(self):
+        """Restart the systemd user service to pick up the new version."""
+        import subprocess
+        try:
+            subprocess.Popen(["systemctl", "--user", "restart", "yay-sys-tray"])
+        except FileNotFoundError:
+            # Not running as a systemd service; just re-check
+            self.start_check()
 
     def show_updates_dialog(self):
         if self._updates_dialog is not None:
@@ -378,6 +404,7 @@ class TrayApp(QObject):
             remote_hosts=self.remote_updates,
             on_update=self._run_local_update if self.is_arch else None,
             on_remote_update=self._run_remote_update,
+            on_remove=self._run_remove if self.is_arch else None,
         )
         self._updates_dialog.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
         self._updates_dialog.destroyed.connect(self._on_updates_dialog_closed)

@@ -540,6 +540,14 @@ class UpdateItemDelegate(QStyledItemDelegate):
         painter.drawEllipse(icons["deps"])
         painter.drawText(icons["deps"], Qt.AlignmentFlag.AlignCenter, "\u2193")
 
+        if "remove" in icons:
+            painter.setPen(QPen(QColor(220, 50, 47), 1.5))
+            painter.drawEllipse(icons["remove"])
+            rm_font = QFont(option.font)
+            rm_font.setBold(True)
+            painter.setFont(rm_font)
+            painter.drawText(icons["remove"], Qt.AlignmentFlag.AlignCenter, "\u00d7")
+
         painter.restore()
 
     def sizeHint(self, option: QStyleOptionViewItem, index) -> QSize:
@@ -573,6 +581,11 @@ class UpdateItemDelegate(QStyledItemDelegate):
         right_edge -= sz
         positions["deps"] = QRectF(right_edge, icon_y, sz, sz)
 
+        # Remove icon: leftmost, with extra gap for visual separation
+        right_edge -= self.ICON_GAP * 2
+        right_edge -= sz
+        positions["remove"] = QRectF(right_edge, icon_y, sz, sz)
+
         return positions
 
     ICON_TOOLTIPS = {
@@ -580,6 +593,7 @@ class UpdateItemDelegate(QStyledItemDelegate):
         "link": "Open package page",
         "rdeps": "Show what depends on this",
         "deps": "Show dependencies",
+        "remove": "Remove package",
     }
 
     def helpEvent(self, event, view, option, index):
@@ -614,7 +628,7 @@ class UpdateItemDelegate(QStyledItemDelegate):
             item_rect.width() - 2 * m, item_rect.height() - 2 * m,
         )
         icons = self._icon_positions(card_rect, data)
-        for name in ("link", "deps", "rdeps"):
+        for name in ("link", "deps", "rdeps", "remove"):
             if name in icons and icons[name].contains(click_pos):
                 return name
         return None
@@ -622,6 +636,10 @@ class UpdateItemDelegate(QStyledItemDelegate):
 
 class _ClickableUpdateList(QListWidget):
     """QListWidget that handles icon clicks on update cards."""
+
+    def __init__(self, parent=None, on_remove: Callable[[str, str], None] | None = None):
+        super().__init__(parent)
+        self._on_remove = on_remove
 
     def mouseReleaseEvent(self, event):
         pos = event.position().toPoint()
@@ -642,7 +660,25 @@ class _ClickableUpdateList(QListWidget):
                     if icon == "rdeps":
                         DependencyTreeDialog(data.package, reverse=True, parent=self).exec()
                         return
+                    if icon == "remove" and self._on_remove:
+                        self._show_remove_menu(data.package, event.globalPosition().toPoint())
+                        return
         super().mouseReleaseEvent(event)
+
+    def _show_remove_menu(self, package: str, global_pos):
+        menu = QMenu(self)
+        menu.addAction("Remove", lambda: self._on_remove(package, "R"))
+        menu.addAction("Remove with unneeded dependencies", lambda: self._on_remove(package, "Rs"))
+        menu.addAction("Remove with unneeded deps + config files", lambda: self._on_remove(package, "Rns"))
+        menu.addSeparator()
+        force_action = menu.addAction(
+            "Force remove (ignore dependency checks)",
+            lambda: self._on_remove(package, "Rdd"),
+        )
+        force_action.setIcon(
+            menu.style().standardIcon(menu.style().StandardPixmap.SP_MessageBoxWarning)
+        )
+        menu.exec(global_pos)
 
     def mouseMoveEvent(self, event):
         pos = event.position().toPoint()
@@ -661,13 +697,17 @@ class _ClickableUpdateList(QListWidget):
         super().mouseMoveEvent(event)
 
 
-def _make_update_list(updates: list[UpdateInfo], parent: QWidget) -> _ClickableUpdateList:
+def _make_update_list(
+    updates: list[UpdateInfo],
+    parent: QWidget,
+    on_remove: Callable[[str, str], None] | None = None,
+) -> _ClickableUpdateList:
     """Create a styled QListWidget populated with update cards."""
     sorted_updates = sorted(
         updates,
         key=lambda u: (u.package not in RESTART_PACKAGES, u.package.lower()),
     )
-    lw = _ClickableUpdateList(parent)
+    lw = _ClickableUpdateList(parent, on_remove=on_remove)
     lw.setItemDelegate(UpdateItemDelegate(lw))
     lw.setSelectionMode(_ClickableUpdateList.SelectionMode.NoSelection)
     lw.setFocusPolicy(Qt.FocusPolicy.NoFocus)
@@ -763,10 +803,12 @@ class UpdatesDialog(QDialog):
         remote_hosts: list | None = None,
         on_update: Callable[[bool], None] | None = None,
         on_remote_update: Callable[[str, bool], None] | None = None,
+        on_remove: Callable[[str, str], None] | None = None,
         parent=None,
     ):
         super().__init__(parent)
         self.on_update = on_update
+        self._on_remove = on_remove
         self._local_needs_restart = False
 
         remote_hosts = remote_hosts or []
@@ -792,7 +834,7 @@ class UpdatesDialog(QDialog):
             if updates:
                 local_needs_restart = any(u.package in RESTART_PACKAGES for u in updates)
                 local_cb = on_update if on_update else None
-                local_tab = self._build_tab(updates, local_needs_restart, local_cb)
+                local_tab = self._build_tab(updates, local_needs_restart, local_cb, on_remove=on_remove)
                 local_label = f"Local ({len(updates)})"
                 idx = tabs.addTab(local_tab, local_label)
                 if local_needs_restart:
@@ -821,7 +863,7 @@ class UpdatesDialog(QDialog):
             self._local_needs_restart = needs_restart
             if needs_restart:
                 layout.addWidget(_make_restart_banner())
-            layout.addWidget(_make_update_list(updates, self))
+            layout.addWidget(_make_update_list(updates, self, on_remove=on_remove))
 
         btn_layout = QHBoxLayout()
         btn_layout.addStretch()
@@ -852,6 +894,7 @@ class UpdatesDialog(QDialog):
         updates: list[UpdateInfo],
         needs_restart: bool,
         on_update: Callable[[bool], None] | None = None,
+        on_remove: Callable[[str, str], None] | None = None,
     ) -> QWidget:
         widget = QWidget()
         tab_layout = QVBoxLayout(widget)
@@ -860,7 +903,7 @@ class UpdatesDialog(QDialog):
         if needs_restart:
             tab_layout.addWidget(_make_restart_banner())
 
-        tab_layout.addWidget(_make_update_list(updates, widget))
+        tab_layout.addWidget(_make_update_list(updates, widget, on_remove=on_remove))
 
         if on_update:
             btn_row = QHBoxLayout()
