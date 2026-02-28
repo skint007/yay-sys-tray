@@ -73,10 +73,15 @@ class TrayApp(QObject):
         self.action_show.setEnabled(False)
         self.menu.addAction(self.action_show)
 
-        self.action_update = QAction("Update System")
-        self.action_update.triggered.connect(self.launch_update)
-        self.action_update.setEnabled(self.is_arch)
-        self.menu.addAction(self.action_update)
+        # Trailing spaces give room for the submenu arrow indicator
+        self.update_menu = QMenu("Update System   ")
+        self.update_menu.setEnabled(False)
+        self.action_update_only = self.update_menu.addAction("Update Now")
+        self.action_update_only.triggered.connect(lambda: self._run_local_update(restart=False))
+        self.action_update_restart = self.update_menu.addAction("Update && Restart")
+        self.action_update_restart.triggered.connect(lambda: self._run_local_update(restart=True))
+        self.action_update_restart.setVisible(False)
+        self.menu.addMenu(self.update_menu)
 
         self.menu.addSeparator()
 
@@ -254,6 +259,22 @@ class TrayApp(QObject):
                     lines.append(f"Restart: {', '.join(result.restart_packages)}")
         lines.append(f"Last check: {self._format_time()}  |  Next: {self._format_next_check()}")
 
+        # Update the "Update System" submenu based on local restart state
+        if local_count > 0 and self.is_arch:
+            self.update_menu.setEnabled(True)
+            if result.needs_restart:
+                self.update_menu.setTitle("Update && Restart   ")
+                self.action_update_only.setText("Update Only")
+                self.action_update_restart.setVisible(True)
+            else:
+                self.update_menu.setTitle("Update System   ")
+                self.action_update_only.setText("Update Now")
+                self.action_update_restart.setVisible(False)
+        else:
+            self.update_menu.setEnabled(False)
+            self.update_menu.setTitle("Update System   ")
+            self.action_update_restart.setVisible(False)
+
         # Set icon
         reboot = result.reboot_info
         if total_count == 0 and reboot and reboot.needed:
@@ -320,9 +341,6 @@ class TrayApp(QObject):
             icon,
             5000,
         )
-
-    def launch_update(self):
-        self._run_local_update(restart=False)
 
     def _run_local_update(self, restart: bool = False):
         self._self_update_pending = any(
