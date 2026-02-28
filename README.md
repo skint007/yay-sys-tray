@@ -109,8 +109,22 @@ Right-click the tray icon and select **Settings**. Configuration is stored in `~
 | Option | Description | Default |
 |---|---|---|
 | Enable | Check remote servers via Tailscale | off |
-| Device tags | Comma-separated Tailscale tags to filter peers | tag:server,tag:arch |
+| Device tags | Comma-separated Tailscale tags to filter peers | server,arch |
 | SSH timeout | Seconds before SSH connection times out | 10 |
+
+#### Remote SSH Setup
+
+Remote server monitoring connects over Tailscale SSH. On non-Arch systems (or any system where Tailscale SSH is not handling authentication), ensure you can SSH into each remote server without a password using SSH key authentication:
+
+```sh
+# Generate a key if you don't have one
+ssh-keygen -t ed25519
+
+# Copy your public key to each remote server
+ssh-copy-id user@<tailscale-hostname>
+```
+
+Verify with `ssh user@<tailscale-hostname>` — it should connect without prompting for a password.
 
 ## License
 

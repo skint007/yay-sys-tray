@@ -81,22 +81,86 @@ def discover_peers(tags: list[str]) -> list[str]:
     return sorted(hostnames)
 
 
+def _ssh_run(hostname: str, command: str, timeout: int) -> subprocess.CompletedProcess[str]:
+    """Run a command on a remote host via SSH."""
+    ssh_opts = [
+        "-o", f"ConnectTimeout={timeout}",
+        *SSH_OPTS,
+    ]
+    return subprocess.run(
+        ["ssh", *ssh_opts, hostname, command],
+        capture_output=True,
+        text=True,
+        timeout=timeout + 30,
+    )
+
+
+def _fetch_remote_descriptions(
+    hostname: str, packages: list[str], timeout: int
+) -> dict[str, str]:
+    """Fetch package descriptions from a remote host's pacman database."""
+    if not packages:
+        return {}
+    try:
+        pkg_args = " ".join(packages)
+        result = _ssh_run(hostname, f"pacman -Qi {pkg_args}", timeout)
+        descriptions: dict[str, str] = {}
+        name = None
+        for line in result.stdout.splitlines():
+            if line.startswith("Name"):
+                name = line.split(":", 1)[1].strip()
+            elif line.startswith("Description") and name:
+                descriptions[name] = line.split(":", 1)[1].strip()
+        return descriptions
+    except Exception:
+        return {}
+
+
+def _fetch_remote_repositories(
+    hostname: str, packages: list[str], timeout: int
+) -> dict[str, tuple[str, str]]:
+    """Fetch repository and architecture from a remote host's pacman sync database."""
+    if not packages:
+        return {}
+    try:
+        pkg_args = " ".join(packages)
+        result = _ssh_run(hostname, f"pacman -Si {pkg_args}", timeout)
+        repos: dict[str, tuple[str, str]] = {}
+        current_repo = ""
+        current_name = ""
+        for line in result.stdout.splitlines():
+            if line.startswith("Repository"):
+                current_repo = line.split(":", 1)[1].strip()
+            elif line.startswith("Name"):
+                current_name = line.split(":", 1)[1].strip()
+            elif line.startswith("Architecture") and current_name:
+                arch = line.split(":", 1)[1].strip()
+                repos[current_name] = (current_repo, arch)
+                current_name = ""
+        return repos
+    except Exception:
+        return {}
+
+
 def check_host(hostname: str, timeout: int) -> HostResult:
     """SSH into a host and run checkupdates to check for updates."""
     try:
-        ssh_opts = [
-            "-o", f"ConnectTimeout={timeout}",
-            *SSH_OPTS,
-        ]
-        result = subprocess.run(
-            ["ssh", *ssh_opts, hostname, "checkupdates"],
-            capture_output=True,
-            text=True,
-            timeout=timeout + 30,
-        )
+        result = _ssh_run(hostname, "checkupdates", timeout)
         # checkupdates: exit 0 = updates, exit 2 = no updates, exit 1 = error
         if result.returncode == 0 and result.stdout.strip():
             updates = parse_update_output(result.stdout)
+
+            # Enrich with descriptions and repository info
+            pkg_names = [u.package for u in updates]
+            descs = _fetch_remote_descriptions(hostname, pkg_names, timeout)
+            repos = _fetch_remote_repositories(hostname, pkg_names, timeout)
+            for u in updates:
+                u.description = descs.get(u.package, "")
+                info = repos.get(u.package)
+                if info:
+                    u.repository, arch = info
+                    u.url = f"https://archlinux.org/packages/{u.repository}/{arch}/{u.package}/"
+
             restart_pkgs = [u.package for u in updates if u.package in RESTART_PACKAGES]
             return HostResult(
                 hostname=hostname,

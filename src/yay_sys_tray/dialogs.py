@@ -733,13 +733,10 @@ class DependencyTreeDialog(QDialog):
         super().__init__(parent)
         self._settings_key = "rdeps_dialog/size" if reverse else "deps_dialog/size"
 
-        if reverse:
-            self.setWindowTitle(f"Required by: {package}")
-            cmd = ["pactree", "-r", package]
-        else:
-            self.setWindowTitle(f"Dependencies: {package}")
-            cmd = ["pactree", package]
+        label = "Required by" if reverse else "Dependencies"
+        cmd = ["pactree", "-r", package] if reverse else ["pactree", package]
 
+        self.setWindowTitle(f"{label}: {package}")
         self.setWindowIcon(create_app_icon())
         self.setMinimumSize(400, 300)
 
@@ -756,7 +753,11 @@ class DependencyTreeDialog(QDialog):
         try:
             result = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
             if result.returncode == 0:
-                text.setPlainText(result.stdout.rstrip())
+                output = result.stdout.rstrip()
+                # Count dependencies (exclude the package itself on the first line)
+                count = max(0, len(output.splitlines()) - 1)
+                self.setWindowTitle(f"{label}: {package} ({count})")
+                text.setPlainText(output)
             else:
                 text.setPlainText(result.stderr.strip() or "No results.")
         except FileNotFoundError:
