@@ -1,12 +1,20 @@
+# Python (legacy)
 __pycache__/
 *.egg-info/
 *.pyc
+
+# Rust / Tauri
+src-tauri/target/
 dist/
 build/
+node_modules/
 
 # makepkg build artifacts
 aur/src/
 aur/pkg/
 aur/*.tar.zst
 aur/yay-sys-tray/
+
+# Local docs
 AUR.md
+RUST_UPLIFT.md
