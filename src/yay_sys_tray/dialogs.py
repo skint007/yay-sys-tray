@@ -809,15 +809,10 @@ class UpdatesDialog(QDialog):
     ):
         super().__init__(parent)
         self.on_update = on_update
+        self._on_remote_update = on_remote_update
         self._on_remove = on_remove
         self._local_needs_restart = False
 
-        remote_hosts = remote_hosts or []
-        remote_with_updates = [h for h in remote_hosts if h.updates]
-        total = len(updates) + sum(len(h.updates) for h in remote_with_updates)
-        use_tabs = len(remote_with_updates) > 0
-
-        self.setWindowTitle(f"Available Updates ({total})")
         self.setWindowIcon(create_app_icon())
         self.setMinimumSize(300, 300)
 
@@ -825,17 +820,51 @@ class UpdatesDialog(QDialog):
         if settings.contains("updates_dialog/size"):
             self.resize(settings.value("updates_dialog/size"))
 
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(8, 8, 8, 8)
+        self._main_layout = QVBoxLayout(self)
+        self._main_layout.setContentsMargins(8, 8, 8, 8)
+
+        # Content area that gets rebuilt on refresh
+        self._content_widget = QWidget()
+        self._main_layout.addWidget(self._content_widget, 1)
+
+        # Loading overlay (hidden by default)
+        self._loading_label = QLabel("Refreshing…")
+        self._loading_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._loading_label.setStyleSheet("color: gray; font-style: italic;")
+        self._loading_label.hide()
+        self._main_layout.addWidget(self._loading_label)
+
+        # Close button (always present)
+        btn_layout = QHBoxLayout()
+        btn_layout.addStretch()
+        close_btn = QPushButton("Close")
+        close_btn.clicked.connect(self.close)
+        btn_layout.addWidget(close_btn)
+        self._main_layout.addLayout(btn_layout)
+
+        self._populate(updates, remote_hosts or [])
+
+    def _populate(self, updates: list[UpdateInfo], remote_hosts: list):
+        """Build or rebuild the content area with current data."""
+        # Replace content widget
+        old = self._content_widget
+        self._content_widget = QWidget()
+        content_layout = QVBoxLayout(self._content_widget)
+        content_layout.setContentsMargins(0, 0, 0, 0)
+
+        remote_with_updates = [h for h in remote_hosts if h.updates]
+        total = len(updates) + sum(len(h.updates) for h in remote_with_updates)
+        use_tabs = len(remote_with_updates) > 0
+
+        self.setWindowTitle(f"Available Updates ({total})")
 
         if use_tabs:
-            # Tabbed view: one tab per system with updates
             tabs = QTabWidget()
 
             if updates:
                 local_needs_restart = any(u.package in RESTART_PACKAGES for u in updates)
-                local_cb = on_update if on_update else None
-                local_tab = self._build_tab(updates, local_needs_restart, local_cb, on_remove=on_remove)
+                local_cb = self.on_update if self.on_update else None
+                local_tab = self._build_tab(updates, local_needs_restart, local_cb, on_remove=self._on_remove)
                 local_label = f"Local ({len(updates)})"
                 idx = tabs.addTab(local_tab, local_label)
                 if local_needs_restart:
@@ -843,52 +872,57 @@ class UpdatesDialog(QDialog):
 
             for host in remote_with_updates:
                 remote_cb = None
-                if on_remote_update:
-                    remote_cb = lambda restart, _h=host.hostname: on_remote_update(_h, restart)
+                if self._on_remote_update:
+                    remote_cb = lambda restart, _h=host.hostname: self._on_remote_update(_h, restart)
                 tab = self._build_tab(host.updates, host.needs_restart, remote_cb)
                 tab_label = f"{host.hostname} ({len(host.updates)})"
                 idx = tabs.addTab(tab, tab_label)
                 if host.needs_restart:
                     tabs.setTabToolTip(idx, "Restart required")
 
-            # Style tabs that need restart with red text
             for i in range(tabs.count()):
                 tooltip = tabs.tabToolTip(i)
                 if tooltip == "Restart required":
                     tabs.tabBar().setTabTextColor(i, QColor(244, 67, 54))
 
-            layout.addWidget(tabs)
+            content_layout.addWidget(tabs)
         else:
-            # Single list, no tabs needed
             needs_restart = any(u.package in RESTART_PACKAGES for u in updates)
             self._local_needs_restart = needs_restart
             if needs_restart:
-                layout.addWidget(_make_restart_banner())
-            layout.addWidget(_make_update_list(updates, self, on_remove=on_remove))
+                content_layout.addWidget(_make_restart_banner())
+            content_layout.addWidget(_make_update_list(updates, self._content_widget, on_remove=self._on_remove))
 
-        btn_layout = QHBoxLayout()
-        btn_layout.addStretch()
+            if self.on_update:
+                btn_row = QHBoxLayout()
+                btn_row.addStretch()
+                if self._local_needs_restart:
+                    split_btn = QToolButton()
+                    split_btn.setText("Update && Restart")
+                    split_btn.setPopupMode(QToolButton.ToolButtonPopupMode.MenuButtonPopup)
+                    split_btn.clicked.connect(self._launch_update)
+                    menu = QMenu(split_btn)
+                    menu.addAction("Update Only (no restart)", self._launch_update_no_restart)
+                    split_btn.setMenu(menu)
+                    btn_row.addWidget(split_btn)
+                else:
+                    update_btn = QPushButton("Update Now")
+                    update_btn.clicked.connect(self._launch_update)
+                    btn_row.addWidget(update_btn)
+                content_layout.addLayout(btn_row)
 
-        if on_update and not use_tabs:
-            if self._local_needs_restart:
-                split_btn = QToolButton()
-                split_btn.setText("Update && Restart")
-                split_btn.setPopupMode(QToolButton.ToolButtonPopupMode.MenuButtonPopup)
-                split_btn.clicked.connect(self._launch_update)
-                menu = QMenu(split_btn)
-                menu.addAction("Update Only (no restart)", self._launch_update_no_restart)
-                split_btn.setMenu(menu)
-                btn_layout.addWidget(split_btn)
-            else:
-                update_btn = QPushButton("Update Now")
-                update_btn.clicked.connect(self._launch_update)
-                btn_layout.addWidget(update_btn)
+        self._main_layout.replaceWidget(old, self._content_widget)
+        old.deleteLater()
+        self._loading_label.hide()
+        self._content_widget.show()
 
-        close_btn = QPushButton("Close")
-        close_btn.clicked.connect(self.close)
-        btn_layout.addWidget(close_btn)
+    def show_loading(self):
+        """Show a loading indicator while a check is in progress."""
+        self._loading_label.show()
 
-        layout.addLayout(btn_layout)
+    def refresh(self, updates: list[UpdateInfo], remote_hosts: list | None = None):
+        """Refresh the dialog content in-place with new data."""
+        self._populate(updates, remote_hosts or [])
 
     def _build_tab(
         self,
