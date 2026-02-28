@@ -17,6 +17,7 @@ pub struct TrayState {
     pub remote_results: RwLock<Vec<HostResult>>,
     pub last_check: RwLock<Option<chrono::DateTime<chrono::Local>>>,
     pub previous_count: RwLock<u32>,
+    pub show_updates_item: RwLock<Option<tauri::menu::MenuItem<tauri::Wry>>>,
     spin_cancel: watch::Sender<bool>,
     bounce_cancel: watch::Sender<bool>,
 }
@@ -30,6 +31,7 @@ impl TrayState {
             remote_results: RwLock::new(Vec::new()),
             last_check: RwLock::new(None),
             previous_count: RwLock::new(0),
+            show_updates_item: RwLock::new(None),
             spin_cancel: spin_tx,
             bounce_cancel: bounce_tx,
         }
@@ -85,7 +87,7 @@ pub fn setup_tray(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
 
     let icon = icons::create_ok_icon();
 
-    let _tray = TrayIconBuilder::new()
+    let _tray = TrayIconBuilder::with_id("main")
         .icon(icon)
         .tooltip("Yay Update Checker\nNo updates checked yet")
         .menu(&menu)
@@ -140,6 +142,13 @@ pub fn setup_tray(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
         })
         .build(app)?;
 
+    // Store the show_updates menu item for later enable/disable
+    {
+        let tray_state = app.state::<TrayState>();
+        let mut item = tray_state.show_updates_item.blocking_write();
+        *item = Some(show_updates);
+    }
+
     // Listen for update-finished events to trigger a re-check
     let handle = app.handle().clone();
     app.listen("update-finished", move |_| {
@@ -191,6 +200,7 @@ pub fn start_periodic_check(app_handle: tauri::AppHandle) {
 
 /// Run a check and update the tray state.
 pub async fn start_check(app_handle: tauri::AppHandle) {
+    log::info!("Starting update check");
     let _ = app_handle.emit("check-started", ());
 
     // Start spin animation
@@ -213,7 +223,11 @@ pub async fn start_check(app_handle: tauri::AppHandle) {
     start_spin_animation(app_handle.clone(), animations_enabled);
 
     // Run local check
+    log::info!("Running local update check");
     let result = checker::check_updates().await;
+    log::info!("Local check result: {} updates, err={}",
+        result.as_ref().map(|r| r.updates.len()).unwrap_or(0),
+        result.as_ref().err().map(|e| e.as_str()).unwrap_or("none"));
 
     // Run remote check if Tailscale is enabled
     let remote_hosts = if tailscale_enabled && !tailscale_tags.is_empty() {
@@ -222,14 +236,22 @@ pub async fn start_check(app_handle: tauri::AppHandle) {
             .map(|t| t.trim().to_string())
             .filter(|t| !t.is_empty())
             .collect();
+        log::info!("Running Tailscale check with tags: {:?}", prefixed_tags);
         match tailscale::check_remote(&prefixed_tags, tailscale_timeout).await {
-            Ok(remote) => remote.hosts,
+            Ok(remote) => {
+                log::info!("Tailscale check found {} hosts", remote.hosts.len());
+                for h in &remote.hosts {
+                    log::info!("  {}: {} updates, error={:?}", h.hostname, h.updates.len(), h.error);
+                }
+                remote.hosts
+            }
             Err(e) => {
                 log::error!("Tailscale check failed: {e}");
                 Vec::new()
             }
         }
     } else {
+        log::info!("Tailscale disabled or no tags configured");
         Vec::new()
     };
 
@@ -250,6 +272,11 @@ pub async fn start_check(app_handle: tauri::AppHandle) {
             let _ = app_handle.emit("check-complete", &check_result);
             update_tray_state(&app_handle, &check_result, &remote_hosts, animations_enabled)
                 .await;
+
+            // Enable/disable "Show Updates" menu item
+            if let Some(item) = tray_state.show_updates_item.read().await.as_ref() {
+                let _ = item.set_enabled(total_count > 0);
+            }
 
             // Send notification if configured
             let should_notify = match notify_mode.as_str() {
@@ -388,11 +415,7 @@ fn update_tray_error(app_handle: &tauri::AppHandle) {
 }
 
 fn get_default_tray(app_handle: &tauri::AppHandle) -> Option<tauri::tray::TrayIcon> {
-    // Tauri v2 uses the first registered tray icon
-    app_handle.tray_by_id("main").or_else(|| {
-        // Try to get any tray icon
-        None
-    })
+    app_handle.tray_by_id("main")
 }
 
 /// Start the spin animation on the tray icon.
