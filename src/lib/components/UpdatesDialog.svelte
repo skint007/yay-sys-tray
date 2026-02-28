@@ -104,50 +104,46 @@
       <p class="text-base-content/50">System is up to date</p>
     </div>
   {:else if useTabs}
-    <!-- Tabbed view: local + remote hosts -->
-    <div role="tablist" class="tabs tabs-bordered">
-      {#if localUpdates.length > 0}
-        <button
-          role="tab"
-          class="tab"
-          class:tab-active={activeTab === 0}
-          class:text-error={localNeedsRestart}
-          onclick={() => (activeTab = 0)}
-        >
-          Local ({localUpdates.length})
-        </button>
-      {/if}
-      {#each remoteWithUpdates as host, i}
-        <button
-          role="tab"
-          class="tab"
-          class:tab-active={activeTab === i + 1}
-          class:text-error={host.needs_restart}
-          onclick={() => (activeTab = i + 1)}
-        >
-          {host.hostname} ({host.updates.length})
-        </button>
-      {/each}
-    </div>
-
-    <div class="flex-1 overflow-y-auto">
-      {#if activeTab === 0 && localUpdates.length > 0}
-        <div class="flex flex-col gap-1.5">
-          {#each localUpdates as update (update.package)}
-            <UpdateCard {update} onremove={handleRemove} />
-          {/each}
-        </div>
-      {:else}
+    <!-- Tabbed view: local + remote hosts (scrollable radio tabs-lift) -->
+    <div class="overflow-x-auto flex-1 min-h-0">
+      <div class="tabs tabs-lift min-w-max">
+        {#if localUpdates.length > 0}
+          <input
+            type="radio"
+            name="updates_tabs"
+            class="tab z-1"
+            class:text-error={localNeedsRestart}
+            aria-label="Local ({localUpdates.length})"
+            checked={activeTab === 0}
+            onchange={() => (activeTab = 0)}
+          />
+          <div class="sticky start-0 tab-content bg-base-100 border-base-300 p-3 overflow-y-auto">
+            <div class="flex flex-col gap-1.5">
+              {#each localUpdates as update (update.package)}
+                <UpdateCard {update} onremove={handleRemove} />
+              {/each}
+            </div>
+          </div>
+        {/if}
         {#each remoteWithUpdates as host, i}
-          {#if activeTab === i + 1}
+          <input
+            type="radio"
+            name="updates_tabs"
+            class="tab z-1"
+            class:text-error={host.needs_restart}
+            aria-label="{host.hostname} ({host.updates.length})"
+            checked={activeTab === i + 1}
+            onchange={() => (activeTab = i + 1)}
+          />
+          <div class="sticky start-0 tab-content bg-base-100 border-base-300 p-3 overflow-y-auto">
             <div class="flex flex-col gap-1.5">
               {#each host.updates as update (update.package)}
                 <UpdateCard {update} />
               {/each}
             </div>
-          {/if}
+          </div>
         {/each}
-      {/if}
+      </div>
     </div>
 
     <!-- Action buttons for active tab -->

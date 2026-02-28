@@ -27,6 +27,8 @@ pub struct AppConfig {
     pub recheck_interval_minutes: u32,
     #[serde(default)]
     pub passwordless_updates: bool,
+    #[serde(default = "default_theme")]
+    pub theme: String,
     #[serde(default)]
     pub tailscale_enabled: bool,
     #[serde(default = "default_tags")]
@@ -39,6 +41,7 @@ fn default_interval() -> u32 { 60 }
 fn default_notify() -> String { "new_only".into() }
 fn default_true() -> bool { true }
 fn default_recheck() -> u32 { 5 }
+fn default_theme() -> String { "default".into() }
 fn default_tags() -> String { "server,arch".into() }
 fn default_timeout() -> u32 { 10 }
 
@@ -51,6 +54,7 @@ impl Default for AppConfig {
             noconfirm: false,
             autostart: false,
             animations: true,
+            theme: "default".into(),
             recheck_interval_minutes: 5,
             passwordless_updates: false,
             tailscale_enabled: false,

@@ -11,15 +11,44 @@
   import DurationPicker from "./DurationPicker.svelte";
   import TagPillSelector from "./TagPillSelector.svelte";
 
+  const THEMES = [
+    "default", "light", "dark", "cupcake", "bumblebee", "emerald",
+    "corporate", "synthwave", "retro", "cyberpunk", "valentine",
+    "halloween", "garden", "forest", "aqua", "lofi", "pastel",
+    "fantasy", "wireframe", "black", "luxury", "dracula", "cmyk",
+    "autumn", "business", "acid", "lemonade", "night", "coffee",
+    "winter", "dim", "nord", "sunset", "caramellatte", "abyss", "silk",
+  ];
+
   let { onclose }: { onclose: () => void } = $props();
 
   let config = $state<AppConfig | null>(null);
   let isArch = $state(false);
   let activeTab = $state<"general" | "tailscale">("general");
+  const initial = { autostart: false, passwordless: false };
 
   onMount(async () => {
     [config, isArch] = await Promise.all([getConfig(), isArchLinux()]);
+    if (config) {
+      initial.autostart = config.autostart;
+      initial.passwordless = config.passwordless_updates;
+    }
   });
+
+  function applyTheme(theme: string) {
+    document.documentElement.setAttribute(
+      "data-theme",
+      theme === "default" ? "" : theme,
+    );
+  }
+
+  async function handleThemeChange(e: Event) {
+    if (!config) return;
+    const theme = (e.target as HTMLSelectElement).value;
+    config.theme = theme;
+    applyTheme(theme);
+    await saveConfig(config);
+  }
 
   async function handleSave() {
     if (!config) return;
@@ -29,18 +58,24 @@
       config.check_interval_minutes = 5;
     }
 
-    // Handle autostart toggle
-    try {
-      await manageAutostart(config.autostart);
-    } catch (e) {
-      console.error("Failed to manage autostart:", e);
+    // Handle autostart toggle (only if changed)
+    if (config.autostart !== initial.autostart) {
+      try {
+        await manageAutostart(config.autostart);
+        initial.autostart = config.autostart;
+      } catch (e) {
+        console.error("Failed to manage autostart:", e);
+      }
     }
 
-    // Handle passwordless updates toggle
-    try {
-      await managePasswordlessUpdates(config.passwordless_updates);
-    } catch (e) {
-      console.error("Failed to manage passwordless updates:", e);
+    // Handle passwordless updates toggle (only if changed)
+    if (config.passwordless_updates !== initial.passwordless) {
+      try {
+        await managePasswordlessUpdates(config.passwordless_updates);
+        initial.passwordless = config.passwordless_updates;
+      } catch (e) {
+        console.error("Failed to manage passwordless updates:", e);
+      }
     }
 
     await saveConfig(config);
@@ -50,29 +85,18 @@
 
 {#if config}
   <div class="flex flex-col h-full p-4 gap-4">
-    <!-- Tabs -->
-    <div role="tablist" class="tabs tabs-bordered">
-      <button
-        role="tab"
-        class="tab"
-        class:tab-active={activeTab === "general"}
-        onclick={() => (activeTab = "general")}
-      >
-        General
-      </button>
-      <button
-        role="tab"
-        class="tab"
-        class:tab-active={activeTab === "tailscale"}
-        onclick={() => (activeTab = "tailscale")}
-      >
-        Tailscale
-      </button>
-    </div>
-
-    <!-- Tab content -->
-    <div class="flex-1 overflow-y-auto">
-      {#if activeTab === "general"}
+    <!-- Tabs (scrollable radio tabs-lift + tab-content) -->
+    <div class="overflow-x-auto flex-1 min-h-0">
+      <div class="tabs tabs-lift min-w-max">
+      <input
+        type="radio"
+        name="settings_tabs"
+        class="tab z-1"
+        aria-label="General"
+        checked={activeTab === "general"}
+        onchange={() => (activeTab = "general")}
+      />
+      <div class="sticky start-0 tab-content bg-base-100 border-base-300 p-4 overflow-y-auto">
         <div class="grid grid-cols-[auto_1fr] gap-x-4 gap-y-3 items-center">
           <span class="text-sm font-medium">Check interval:</span>
           <DurationPicker bind:value={config.check_interval_minutes} />
@@ -126,6 +150,17 @@
             <span class="label-text">Animate tray icon</span>
           </label>
 
+          <span class="text-sm font-medium">Theme:</span>
+          <select
+            class="select select-sm select-bordered w-full"
+            bind:value={config.theme}
+            onchange={handleThemeChange}
+          >
+            {#each THEMES as theme}
+              <option value={theme}>{theme}</option>
+            {/each}
+          </select>
+
           <span class="text-sm font-medium">Re-check cooldown:</span>
           <label class="input input-sm input-bordered w-32 flex items-center gap-1">
             <input
@@ -149,7 +184,17 @@
             <span class="label-text">No sudo password for pacman</span>
           </label>
         </div>
-      {:else}
+      </div>
+
+      <input
+        type="radio"
+        name="settings_tabs"
+        class="tab z-1"
+        aria-label="Tailscale"
+        checked={activeTab === "tailscale"}
+        onchange={() => (activeTab = "tailscale")}
+      />
+      <div class="sticky start-0 tab-content bg-base-100 border-base-300 p-4 overflow-y-auto">
         <div class="grid grid-cols-[auto_1fr] gap-x-4 gap-y-3 items-start">
           <span class="text-sm font-medium pt-1">Enable:</span>
           <label class="label cursor-pointer justify-start gap-2">
@@ -180,7 +225,8 @@
             <span class="text-xs opacity-60">seconds</span>
           </label>
         </div>
-      {/if}
+      </div>
+    </div>
     </div>
 
     <!-- Buttons -->

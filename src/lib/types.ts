@@ -40,6 +40,7 @@ export interface AppConfig {
   noconfirm: boolean;
   autostart: boolean;
   animations: boolean;
+  theme: string;
   recheck_interval_minutes: number;
   passwordless_updates: boolean;
   tailscale_enabled: boolean;
