@@ -1,10 +1,22 @@
+use std::sync::OnceLock;
 use tauri::image::Image;
 
 const SIZE: u32 = 64;
 
+/// Lazily-initialized font database with system fonts loaded.
+fn fontdb() -> &'static resvg::usvg::fontdb::Database {
+    static DB: OnceLock<resvg::usvg::fontdb::Database> = OnceLock::new();
+    DB.get_or_init(|| {
+        let mut db = resvg::usvg::fontdb::Database::new();
+        db.load_system_fonts();
+        db
+    })
+}
+
 fn render_svg(svg: &str) -> Image<'static> {
-    let tree = resvg::usvg::Tree::from_str(svg, &resvg::usvg::Options::default())
-        .expect("Failed to parse SVG");
+    let mut opt = resvg::usvg::Options::default();
+    opt.fontdb = std::sync::Arc::new(fontdb().clone());
+    let tree = resvg::usvg::Tree::from_str(svg, &opt).expect("Failed to parse SVG");
     let size = tree.size();
     let mut pixmap =
         resvg::tiny_skia::Pixmap::new(size.width() as u32, size.height() as u32).unwrap();
@@ -35,14 +47,14 @@ pub fn create_updates_icon(count: u32) -> Image<'static> {
         "99+".to_string()
     };
     let font_size = match text.len() {
-        1 => 32,
-        2 => 26,
-        _ => 20,
+        1 => 36,
+        2 => 30,
+        _ => 22,
     };
     render_svg(&format!(
         r##"<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64">
   <circle cx="32" cy="32" r="30" fill="#FF9800"/>
-  <text x="32" y="32" text-anchor="middle" dominant-baseline="central"
+  <text x="32" y="34" text-anchor="middle" dominant-baseline="central"
     fill="white" font-family="sans-serif" font-size="{font_size}" font-weight="bold">{text}</text>
 </svg>"##
     ))
@@ -56,14 +68,14 @@ pub fn create_restart_icon(count: u32) -> Image<'static> {
         "99+".to_string()
     };
     let font_size = match text.len() {
-        1 => 32,
-        2 => 26,
-        _ => 20,
+        1 => 36,
+        2 => 30,
+        _ => 22,
     };
     render_svg(&format!(
         r##"<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64">
   <circle cx="32" cy="32" r="30" fill="#F44336"/>
-  <text x="32" y="32" text-anchor="middle" dominant-baseline="central"
+  <text x="32" y="34" text-anchor="middle" dominant-baseline="central"
     fill="white" font-family="sans-serif" font-size="{font_size}" font-weight="bold">{text}</text>
 </svg>"##
     ))
@@ -100,14 +112,20 @@ pub fn create_error_icon() -> Image<'static> {
 }
 
 /// Generate checking SVG with the arrow rotated by the given angle (degrees).
+///
+/// Arc centered at (32,32) with r=14, spanning 270° from 30° to 300° (math coords).
+/// Start: (44.1, 25.0), End: (39.0, 44.1)
 fn create_checking_svg(angle: f64) -> String {
     format!(
         r##"<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64">
   <circle cx="32" cy="32" r="30" fill="#2196F3"/>
   <g transform="rotate({angle} 32 32)">
-    <path d="M 44.1 20.0 A 14 14 0 1 0 44.1 44.0"
+    <path d="M 44.1 25.0 A 14 14 0 1 0 39.0 44.1"
       fill="none" stroke="white" stroke-width="4" stroke-linecap="round"/>
-    <polygon points="44.1,44 50,38 50,48" fill="white"/>
+    <line x1="39" y1="44.1" x2="47" y2="36.1" stroke="white" stroke-width="3"
+      stroke-linecap="round"/>
+    <line x1="39" y1="44.1" x2="47" y2="46.5" stroke="white" stroke-width="3"
+      stroke-linecap="round"/>
   </g>
 </svg>"##
     )

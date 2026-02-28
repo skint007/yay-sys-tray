@@ -383,14 +383,14 @@ async fn update_tray_state(
     } else if any_restart {
         let icon = icons::create_restart_icon(total_count);
         if animations {
-            start_bounce_animation(app_handle.clone(), icon, 500, 0);
+            start_bounce_animation(app_handle.clone(), icon, 500, 10);
         } else {
             let _ = tray.set_icon(Some(icons::create_restart_icon(total_count)));
         }
     } else {
         let icon = icons::create_updates_icon(total_count);
         if animations {
-            start_bounce_animation(app_handle.clone(), icon, 500, 0);
+            start_bounce_animation(app_handle.clone(), icon, 500, 10);
         } else {
             let _ = tray.set_icon(Some(icons::create_updates_icon(total_count)));
         }
