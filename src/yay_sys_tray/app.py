@@ -36,7 +36,7 @@ class TrayApp(QObject):
         self.remote_updates: list[HostResult] = []
         self.checker: UpdateChecker | None = None
         self.tailscale_checker: TailscaleChecker | None = None
-        self.update_process: QProcess | None = None
+        self._update_processes: list[QProcess] = []
         self.last_check_time: datetime | None = None
         self._old_count = 0
         self._updates_dialog = None
@@ -358,9 +358,11 @@ class TrayApp(QObject):
             if self.config.noconfirm:
                 yay_cmd.append("--noconfirm")
         prefix = TERMINAL_CMDS.get(terminal, [terminal, "-e"])
-        self.update_process = QProcess(self)
-        self.update_process.finished.connect(self._on_update_finished)
-        self.update_process.start(prefix[0], prefix[1:] + yay_cmd)
+        proc = QProcess(self)
+        proc.setProperty("is_local", True)
+        proc.finished.connect(lambda: self._on_process_finished(proc))
+        self._update_processes.append(proc)
+        proc.start(prefix[0], prefix[1:] + yay_cmd)
 
     def _run_remote_update(self, hostname: str, restart: bool = False):
         terminal = self.config.terminal
@@ -371,9 +373,10 @@ class TrayApp(QObject):
             cmd += " && sudo reboot"
         ssh_cmd = ["ssh", hostname, cmd]
         prefix = TERMINAL_CMDS.get(terminal, [terminal, "-e"])
-        self.update_process = QProcess(self)
-        self.update_process.finished.connect(self._on_update_finished)
-        self.update_process.start(prefix[0], prefix[1:] + ssh_cmd)
+        proc = QProcess(self)
+        proc.finished.connect(lambda: self._on_process_finished(proc))
+        self._update_processes.append(proc)
+        proc.start(prefix[0], prefix[1:] + ssh_cmd)
 
     def _run_remove(self, package: str, flags: str):
         terminal = self.config.terminal
@@ -381,17 +384,28 @@ class TrayApp(QObject):
         if self.config.noconfirm:
             yay_cmd.append("--noconfirm")
         prefix = TERMINAL_CMDS.get(terminal, [terminal, "-e"])
-        self.update_process = QProcess(self)
-        self.update_process.finished.connect(self._on_update_finished)
-        self.update_process.start(prefix[0], prefix[1:] + yay_cmd)
+        proc = QProcess(self)
+        proc.finished.connect(lambda: self._on_process_finished(proc))
+        self._update_processes.append(proc)
+        proc.start(prefix[0], prefix[1:] + yay_cmd)
 
-    def _on_update_finished(self):
-        self.update_process = None
-        if getattr(self, "_self_update_pending", False):
+    def _run_all_remote_updates(self):
+        for host in self.remote_updates:
+            if host.updates:
+                self._run_remote_update(host.hostname, restart=host.needs_restart)
+
+    def _on_process_finished(self, proc: QProcess):
+        if proc in self._update_processes:
+            self._update_processes.remove(proc)
+        proc.deleteLater()
+
+        if proc.property("is_local") and getattr(self, "_self_update_pending", False):
             self._self_update_pending = False
             self._restart_service()
             return
-        self.start_check()
+
+        if not self._update_processes:
+            self.start_check()
 
     def _restart_service(self):
         """Restart the systemd user service to pick up the new version."""
@@ -420,6 +434,7 @@ class TrayApp(QObject):
             remote_hosts=self.remote_updates,
             on_update=self._run_local_update if self.is_arch else None,
             on_remote_update=self._run_remote_update,
+            on_update_all_remote=self._run_all_remote_updates,
             on_remove=self._run_remove if self.is_arch else None,
         )
         self._updates_dialog.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)

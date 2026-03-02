@@ -804,12 +804,14 @@ class UpdatesDialog(QDialog):
         remote_hosts: list | None = None,
         on_update: Callable[[bool], None] | None = None,
         on_remote_update: Callable[[str, bool], None] | None = None,
+        on_update_all_remote: Callable[[], None] | None = None,
         on_remove: Callable[[str, str], None] | None = None,
         parent=None,
     ):
         super().__init__(parent)
         self.on_update = on_update
         self._on_remote_update = on_remote_update
+        self._on_update_all_remote = on_update_all_remote
         self._on_remove = on_remove
         self._local_needs_restart = False
 
@@ -886,6 +888,14 @@ class UpdatesDialog(QDialog):
                     tabs.tabBar().setTabTextColor(i, QColor(244, 67, 54))
 
             content_layout.addWidget(tabs)
+
+            if self._on_update_all_remote and len(remote_with_updates) > 1:
+                all_btn_row = QHBoxLayout()
+                all_btn_row.addStretch()
+                all_btn = QPushButton(f"Update All Remote ({len(remote_with_updates)})")
+                all_btn.clicked.connect(self._on_update_all_remote)
+                all_btn_row.addWidget(all_btn)
+                content_layout.addLayout(all_btn_row)
         else:
             needs_restart = any(u.package in RESTART_PACKAGES for u in updates)
             self._local_needs_restart = needs_restart
