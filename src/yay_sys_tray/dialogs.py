@@ -264,6 +264,11 @@ class SettingsDialog(QDialog):
         self.tag_pills = TagPillWidget(selected)
         tailscale_layout.addRow("Device tags:", self.tag_pills)
 
+        import os
+        self.ssh_user_edit = QLineEdit(config.tailscale_ssh_user)
+        self.ssh_user_edit.setPlaceholderText(os.getlogin())
+        tailscale_layout.addRow("SSH user:", self.ssh_user_edit)
+
         self.tailscale_timeout_spin = QSpinBox()
         self.tailscale_timeout_spin.setRange(5, 60)
         self.tailscale_timeout_spin.setSuffix(" seconds")
@@ -271,8 +276,10 @@ class SettingsDialog(QDialog):
         tailscale_layout.addRow("SSH timeout:", self.tailscale_timeout_spin)
 
         self.tailscale_enabled_check.toggled.connect(self.tag_pills.setEnabled)
+        self.tailscale_enabled_check.toggled.connect(self.ssh_user_edit.setEnabled)
         self.tailscale_enabled_check.toggled.connect(self.tailscale_timeout_spin.setEnabled)
         self.tag_pills.setEnabled(config.tailscale_enabled)
+        self.ssh_user_edit.setEnabled(config.tailscale_enabled)
         self.tailscale_timeout_spin.setEnabled(config.tailscale_enabled)
 
         tabs.addTab(tailscale_widget, "Tailscale")
@@ -298,6 +305,7 @@ class SettingsDialog(QDialog):
             tailscale_enabled=self.tailscale_enabled_check.isChecked(),
             tailscale_tags=",".join(self.tag_pills.selected()),
             tailscale_timeout=self.tailscale_timeout_spin.value(),
+            tailscale_ssh_user=self.ssh_user_edit.text().strip(),
         )
 
 

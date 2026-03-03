@@ -81,14 +81,15 @@ def discover_peers(tags: list[str]) -> list[str]:
     return sorted(hostnames)
 
 
-def _ssh_run(hostname: str, command: str, timeout: int) -> subprocess.CompletedProcess[str]:
+def _ssh_run(hostname: str, command: str, timeout: int, user: str = "") -> subprocess.CompletedProcess[str]:
     """Run a command on a remote host via SSH."""
     ssh_opts = [
         "-o", f"ConnectTimeout={timeout}",
         *SSH_OPTS,
     ]
+    target = f"{user}@{hostname}" if user else hostname
     return subprocess.run(
-        ["ssh", *ssh_opts, hostname, command],
+        ["ssh", *ssh_opts, target, command],
         capture_output=True,
         text=True,
         timeout=timeout + 30,
@@ -96,14 +97,14 @@ def _ssh_run(hostname: str, command: str, timeout: int) -> subprocess.CompletedP
 
 
 def _fetch_remote_descriptions(
-    hostname: str, packages: list[str], timeout: int
+    hostname: str, packages: list[str], timeout: int, user: str = ""
 ) -> dict[str, str]:
     """Fetch package descriptions from a remote host's pacman database."""
     if not packages:
         return {}
     try:
         pkg_args = " ".join(packages)
-        result = _ssh_run(hostname, f"pacman -Qi {pkg_args}", timeout)
+        result = _ssh_run(hostname, f"pacman -Qi {pkg_args}", timeout, user=user)
         descriptions: dict[str, str] = {}
         name = None
         for line in result.stdout.splitlines():
@@ -117,14 +118,14 @@ def _fetch_remote_descriptions(
 
 
 def _fetch_remote_repositories(
-    hostname: str, packages: list[str], timeout: int
+    hostname: str, packages: list[str], timeout: int, user: str = ""
 ) -> dict[str, tuple[str, str]]:
     """Fetch repository and architecture from a remote host's pacman sync database."""
     if not packages:
         return {}
     try:
         pkg_args = " ".join(packages)
-        result = _ssh_run(hostname, f"pacman -Si {pkg_args}", timeout)
+        result = _ssh_run(hostname, f"pacman -Si {pkg_args}", timeout, user=user)
         repos: dict[str, tuple[str, str]] = {}
         current_repo = ""
         current_name = ""
@@ -142,18 +143,18 @@ def _fetch_remote_repositories(
         return {}
 
 
-def check_host(hostname: str, timeout: int) -> HostResult:
+def check_host(hostname: str, timeout: int, user: str = "") -> HostResult:
     """SSH into a host and run checkupdates to check for updates."""
     try:
-        result = _ssh_run(hostname, "checkupdates", timeout)
+        result = _ssh_run(hostname, "checkupdates", timeout, user=user)
         # checkupdates: exit 0 = updates, exit 2 = no updates, exit 1 = error
         if result.returncode == 0 and result.stdout.strip():
             updates = parse_update_output(result.stdout)
 
             # Enrich with descriptions and repository info
             pkg_names = [u.package for u in updates]
-            descs = _fetch_remote_descriptions(hostname, pkg_names, timeout)
-            repos = _fetch_remote_repositories(hostname, pkg_names, timeout)
+            descs = _fetch_remote_descriptions(hostname, pkg_names, timeout, user=user)
+            repos = _fetch_remote_repositories(hostname, pkg_names, timeout, user=user)
             for u in updates:
                 u.description = descs.get(u.package, "")
                 info = repos.get(u.package)
@@ -181,10 +182,11 @@ class TailscaleChecker(QThread):
     check_complete = pyqtSignal(object)  # RemoteCheckResult
     check_error = pyqtSignal(str)
 
-    def __init__(self, tags: list[str], timeout: int):
+    def __init__(self, tags: list[str], timeout: int, ssh_user: str = ""):
         super().__init__()
         self.tags = tags
         self.timeout = timeout
+        self.ssh_user = ssh_user
 
     def run(self):
         try:
@@ -197,7 +199,7 @@ class TailscaleChecker(QThread):
             max_workers = min(len(hostnames), 8)
             with ThreadPoolExecutor(max_workers=max_workers) as pool:
                 futures = {
-                    pool.submit(check_host, h, self.timeout): h
+                    pool.submit(check_host, h, self.timeout, user=self.ssh_user): h
                     for h in hostnames
                 }
                 for future in as_completed(futures):

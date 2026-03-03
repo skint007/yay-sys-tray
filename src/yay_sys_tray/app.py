@@ -25,6 +25,29 @@ TERMINAL_CMDS = {
     "xterm": ["xterm", "-hold", "-e"],
 }
 
+TERMINAL_TITLE_FLAG = {
+    "kitty": "--title",
+    "konsole": None,  # no simple title flag
+    "alacritty": "--title",
+    "foot": "--title",
+    "xterm": "-T",
+}
+
+
+def _terminal_prefix(terminal: str, title: str | None = None) -> list[str]:
+    """Build the terminal command prefix, optionally setting the window title."""
+    base = list(TERMINAL_CMDS.get(terminal, [terminal, "-e"]))
+    if title:
+        flag = TERMINAL_TITLE_FLAG.get(terminal, "--title")
+        if flag:
+            # Insert title flag before -e (if present) so it's treated as a terminal arg
+            try:
+                e_idx = base.index("-e")
+                base[e_idx:e_idx] = [flag, title]
+            except ValueError:
+                base.extend([flag, title])
+    return base
+
 
 class TrayApp(QObject):
     def __init__(self, config: AppConfig):
@@ -199,7 +222,7 @@ class TrayApp(QObject):
         if self.config.tailscale_enabled:
             tags = [f"tag:{t.strip()}" for t in self.config.tailscale_tags.split(",") if t.strip()]
             if tags:
-                self.tailscale_checker = TailscaleChecker(tags, self.config.tailscale_timeout)
+                self.tailscale_checker = TailscaleChecker(tags, self.config.tailscale_timeout, ssh_user=self.config.tailscale_ssh_user)
                 self.tailscale_checker.check_complete.connect(self._on_remote_check_complete)
                 self.tailscale_checker.check_error.connect(self._on_remote_check_error)
                 self.tailscale_checker.finished.connect(self._on_remote_thread_finished)
@@ -357,7 +380,7 @@ class TrayApp(QObject):
             yay_cmd = ["yay", "-Syu"]
             if self.config.noconfirm:
                 yay_cmd.append("--noconfirm")
-        prefix = TERMINAL_CMDS.get(terminal, [terminal, "-e"])
+        prefix = _terminal_prefix(terminal, "Updating: local")
         proc = QProcess(self)
         proc.setProperty("is_local", True)
         proc.finished.connect(lambda: self._on_process_finished(proc))
@@ -371,8 +394,10 @@ class TrayApp(QObject):
             cmd += " --noconfirm"
         if restart:
             cmd += " && sudo reboot"
-        ssh_cmd = ["ssh", hostname, cmd]
-        prefix = TERMINAL_CMDS.get(terminal, [terminal, "-e"])
+        user = self.config.tailscale_ssh_user
+        target = f"{user}@{hostname}" if user else hostname
+        ssh_cmd = ["ssh", target, cmd]
+        prefix = _terminal_prefix(terminal, f"Updating: {hostname}")
         proc = QProcess(self)
         proc.finished.connect(lambda: self._on_process_finished(proc))
         self._update_processes.append(proc)
@@ -383,7 +408,7 @@ class TrayApp(QObject):
         yay_cmd = ["yay", f"-{flags}", package]
         if self.config.noconfirm:
             yay_cmd.append("--noconfirm")
-        prefix = TERMINAL_CMDS.get(terminal, [terminal, "-e"])
+        prefix = _terminal_prefix(terminal, f"Removing: {package}")
         proc = QProcess(self)
         proc.finished.connect(lambda: self._on_process_finished(proc))
         self._update_processes.append(proc)

@@ -37,6 +37,7 @@ class AppConfig:
     tailscale_enabled: bool = False
     tailscale_tags: str = "server,arch"
     tailscale_timeout: int = 10
+    tailscale_ssh_user: str = ""
 
     def __post_init__(self):
         if not self.terminal:
