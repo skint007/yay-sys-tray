@@ -25,6 +25,7 @@ def _detect_terminal() -> str:
 
 @dataclass
 class AppConfig:
+    check_interval_enabled: bool = True
     check_interval_minutes: int = 60
     notify: str = "new_only"  # "always" | "new_only" | "never"
     terminal: str = ""
@@ -38,6 +39,10 @@ class AppConfig:
     tailscale_tags: str = "server,arch"
     tailscale_timeout: int = 10
     tailscale_ssh_user: str = ""
+    # Scheduled check (in addition to interval)
+    scheduled_check_enabled: bool = False
+    scheduled_check_day: int = 5  # 0=Mon .. 6=Sun, default Saturday
+    scheduled_check_time: str = "02:00"
 
     def __post_init__(self):
         if not self.terminal:

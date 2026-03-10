@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Callable
 
-from PyQt6.QtCore import QEvent, QPointF, QRectF, QSettings, QSize, Qt, QUrl
+from PyQt6.QtCore import QEvent, QPointF, QRectF, QSettings, QSize, Qt, QTime, QUrl
 from PyQt6.QtGui import QColor, QDesktopServices, QFont, QPainter, QPainterPath, QPen
 from PyQt6.QtWidgets import QMenu, QToolTip
 from PyQt6.QtWidgets import (
@@ -23,6 +23,7 @@ from PyQt6.QtWidgets import (
     QStyleOptionViewItem,
     QTabWidget,
     QTextEdit,
+    QTimeEdit,
     QToolButton,
     QVBoxLayout,
     QWidget,
@@ -214,8 +215,44 @@ class SettingsDialog(QDialog):
         general_widget = QWidget()
         general_layout = QFormLayout(general_widget)
 
+        # Interval check row
+        interval_row = QHBoxLayout()
+        self.interval_check = QCheckBox()
+        self.interval_check.setChecked(config.check_interval_enabled)
+        interval_row.addWidget(self.interval_check)
         self.interval_widget = DurationWidget(config.check_interval_minutes)
-        general_layout.addRow("Check interval:", self.interval_widget)
+        interval_row.addWidget(self.interval_widget)
+        interval_row.addStretch()
+        self.interval_widget.setEnabled(config.check_interval_enabled)
+        self.interval_check.toggled.connect(self.interval_widget.setEnabled)
+        general_layout.addRow("Check interval:", interval_row)
+
+        # Scheduled check row
+        schedule_row = QHBoxLayout()
+        self.scheduled_check = QCheckBox()
+        self.scheduled_check.setChecked(config.scheduled_check_enabled)
+        schedule_row.addWidget(self.scheduled_check)
+
+        days = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
+        self.scheduled_day = QComboBox()
+        self.scheduled_day.addItems(days)
+        self.scheduled_day.setCurrentIndex(config.scheduled_check_day)
+        schedule_row.addWidget(self.scheduled_day)
+
+        self.scheduled_time = QTimeEdit()
+        self.scheduled_time.setDisplayFormat("hh:mm AP")
+        parts = config.scheduled_check_time.split(":")
+        h, m = int(parts[0]), int(parts[1]) if len(parts) > 1 else 0
+        self.scheduled_time.setTime(QTime(h, m))
+        schedule_row.addWidget(self.scheduled_time)
+        schedule_row.addStretch()
+
+        self.scheduled_day.setEnabled(config.scheduled_check_enabled)
+        self.scheduled_time.setEnabled(config.scheduled_check_enabled)
+        self.scheduled_check.toggled.connect(self.scheduled_day.setEnabled)
+        self.scheduled_check.toggled.connect(self.scheduled_time.setEnabled)
+
+        general_layout.addRow("Scheduled check:", schedule_row)
 
         self.notify_combo = QComboBox()
         self.notify_combo.addItems(["always", "new_only", "never"])
@@ -294,6 +331,7 @@ class SettingsDialog(QDialog):
 
     def get_config(self) -> AppConfig:
         return AppConfig(
+            check_interval_enabled=self.interval_check.isChecked(),
             check_interval_minutes=max(5, self.interval_widget.value()),
             notify=self.notify_combo.currentText(),
             terminal=self.terminal_edit.text().strip(),
@@ -306,6 +344,9 @@ class SettingsDialog(QDialog):
             tailscale_tags=",".join(self.tag_pills.selected()),
             tailscale_timeout=self.tailscale_timeout_spin.value(),
             tailscale_ssh_user=self.ssh_user_edit.text().strip(),
+            scheduled_check_enabled=self.scheduled_check.isChecked(),
+            scheduled_check_day=self.scheduled_day.currentIndex(),
+            scheduled_check_time=self.scheduled_time.time().toString("HH:mm"),
         )
 
 

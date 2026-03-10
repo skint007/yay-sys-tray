@@ -122,10 +122,14 @@ class TrayApp(QObject):
 
         self.tray.setContextMenu(self.menu)
 
-        # Periodic check timer
-        self.timer = QTimer()
-        self.timer.timeout.connect(self.start_check)
-        self._restart_timer()
+        # Watchdog timer: checks wall-clock time every 60s so sleep/resume
+        # doesn't cause missed checks (QTimer counts awake time only).
+        self._next_interval_check: datetime | None = None
+        self._next_scheduled_check: datetime | None = None
+        self._watchdog = QTimer()
+        self._watchdog.timeout.connect(self._watchdog_tick)
+        self._recalc_timers()
+        self._watchdog.start(60_000)
 
         # Initial check after a short delay
         QTimer.singleShot(2000, self.start_check)
@@ -133,9 +137,54 @@ class TrayApp(QObject):
     def show(self):
         self.tray.show()
 
-    def _restart_timer(self):
-        interval_ms = self.config.check_interval_minutes * 60 * 1000
-        self.timer.start(interval_ms)
+    def _recalc_timers(self):
+        """Recompute the next fire times for interval and scheduled checks."""
+        # Interval
+        if self.config.check_interval_enabled and self.last_check_time:
+            self._next_interval_check = (
+                self.last_check_time + timedelta(minutes=self.config.check_interval_minutes)
+            )
+        elif self.config.check_interval_enabled:
+            # No check yet — will fire on initial check; set far future so watchdog ignores
+            self._next_interval_check = None
+        else:
+            self._next_interval_check = None
+
+        # Scheduled
+        if self.config.scheduled_check_enabled:
+            self._next_scheduled_check = self._calc_next_scheduled()
+        else:
+            self._next_scheduled_check = None
+
+    def _calc_next_scheduled(self) -> datetime:
+        """Compute the next occurrence of the scheduled day/time."""
+        now = datetime.now()
+        parts = self.config.scheduled_check_time.split(":")
+        hour, minute = int(parts[0]), int(parts[1]) if len(parts) > 1 else 0
+        target_weekday = self.config.scheduled_check_day  # 0=Mon
+
+        days_ahead = (target_weekday - now.weekday()) % 7
+        target = now.replace(hour=hour, minute=minute, second=0, microsecond=0) + timedelta(days=days_ahead)
+
+        if target <= now:
+            target += timedelta(weeks=1)
+        return target
+
+    def _watchdog_tick(self):
+        """Fires every 60s; checks wall-clock time against targets."""
+        now = datetime.now()
+        fired = False
+
+        if self._next_interval_check and now >= self._next_interval_check:
+            fired = True
+
+        if self._next_scheduled_check and now >= self._next_scheduled_check:
+            fired = True
+            # Push to next week immediately so it doesn't re-fire
+            self._next_scheduled_check = self._calc_next_scheduled()
+
+        if fired:
+            self.start_check()
 
     def start_check(self):
         if self.checker is not None and self.checker.isRunning():
@@ -217,6 +266,7 @@ class TrayApp(QObject):
         self.updates = result.updates
         self.local_result = result
         self.last_check_time = datetime.now()
+        self._recalc_timers()
 
         # Chain remote check if Tailscale is enabled
         if self.config.tailscale_enabled:
@@ -492,7 +542,7 @@ class TrayApp(QObject):
             if not self.config.manage_passwordless_updates():
                 self.config.passwordless_updates = old_passwordless
                 self.config.save()
-        self._restart_timer()
+        self._recalc_timers()
 
     def _on_settings_dialog_closed(self):
         self._settings_dialog = None
@@ -525,13 +575,21 @@ class TrayApp(QObject):
         return "never"
 
     def _format_next_check(self) -> str:
-        if self.last_check_time:
-            next_time = self.last_check_time + timedelta(minutes=self.config.check_interval_minutes)
-            now = datetime.now()
-            if next_time.date() == now.date():
-                return next_time.strftime("%H:%M")
-            elif next_time.date() == (now + timedelta(days=1)).date():
-                return f"tomorrow {next_time.strftime('%H:%M')}"
-            else:
-                return next_time.strftime("%b %d %H:%M")
-        return "—"
+        now = datetime.now()
+        candidates: list[datetime] = []
+
+        if self._next_interval_check:
+            candidates.append(self._next_interval_check)
+        if self._next_scheduled_check:
+            candidates.append(self._next_scheduled_check)
+
+        if not candidates:
+            return "—"
+
+        next_time = min(candidates)
+        if next_time.date() == now.date():
+            return next_time.strftime("%H:%M")
+        elif next_time.date() == (now + timedelta(days=1)).date():
+            return f"tomorrow {next_time.strftime('%H:%M')}"
+        else:
+            return next_time.strftime("%a %H:%M")
