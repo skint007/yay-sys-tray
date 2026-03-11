@@ -543,6 +543,7 @@ class TrayApp(QObject):
                 self.config.passwordless_updates = old_passwordless
                 self.config.save()
         self._recalc_timers()
+        self._refresh_tooltip()
 
     def _on_settings_dialog_closed(self):
         self._settings_dialog = None
@@ -568,6 +569,18 @@ class TrayApp(QObject):
             return True
         elapsed = datetime.now() - self.last_check_time
         return elapsed >= timedelta(minutes=self.config.recheck_interval_minutes)
+
+    def _refresh_tooltip(self):
+        """Rebuild the tooltip with the current next-check times."""
+        current = self.tray.toolTip()
+        # Replace the last line (Last check / Next line) if present
+        lines = current.split("\n")
+        new_tail = f"Last check: {self._format_time()}  |  Next: {self._format_next_check()}"
+        if lines and lines[-1].startswith("Last check:"):
+            lines[-1] = new_tail
+        else:
+            lines.append(new_tail)
+        self.tray.setToolTip("\n".join(lines))
 
     def _format_time(self) -> str:
         if self.last_check_time:
