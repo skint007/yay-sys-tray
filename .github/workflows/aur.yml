@@ -33,12 +33,7 @@ jobs:
           mkdir -p ~/.ssh
           echo "$AUR_SSH_KEY" > ~/.ssh/aur
           chmod 600 ~/.ssh/aur
-          ssh-keyscan aur.archlinux.org >> ~/.ssh/known_hosts
-          cat > ~/.ssh/config <<'CFG'
-          Host aur.archlinux.org
-            IdentityFile ~/.ssh/aur
-            User aur
-          CFG
+          export GIT_SSH_COMMAND="ssh -i ~/.ssh/aur -o StrictHostKeyChecking=accept-new"
 
           # Clone AUR repo and explicitly checkout master
           git clone ssh://aur@aur.archlinux.org/yay-sys-tray-git.git /tmp/aur-repo
