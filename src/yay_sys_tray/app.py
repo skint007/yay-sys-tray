@@ -15,7 +15,7 @@ from yay_sys_tray.icons import (
     create_restart_icon,
     create_updates_icon,
 )
-from yay_sys_tray.tailscale import HostResult, RemoteCheckResult, TailscaleChecker
+from yay_sys_tray.tailscale import HostResult, RemoteCheckResult, SingleHostChecker, TailscaleChecker
 
 TERMINAL_CMDS = {
     "kitty": ["kitty", "--hold"],
@@ -60,6 +60,7 @@ class TrayApp(QObject):
         self.checker: UpdateChecker | None = None
         self.tailscale_checker: TailscaleChecker | None = None
         self._update_processes: list[QProcess] = []
+        self._host_checkers: list[SingleHostChecker] = []
         self.last_check_time: datetime | None = None
         self._old_count = 0
         self._updates_dialog = None
@@ -432,7 +433,7 @@ class TrayApp(QObject):
                 yay_cmd.append("--noconfirm")
         prefix = _terminal_prefix(terminal, "Updating: local")
         proc = QProcess(self)
-        proc.setProperty("is_local", True)
+        proc.setProperty("host", "local")
         proc.finished.connect(lambda: self._on_process_finished(proc))
         self._update_processes.append(proc)
         proc.start(prefix[0], prefix[1:] + yay_cmd)
@@ -449,6 +450,7 @@ class TrayApp(QObject):
         ssh_cmd = ["ssh", target, cmd]
         prefix = _terminal_prefix(terminal, f"Updating: {hostname}")
         proc = QProcess(self)
+        proc.setProperty("host", hostname)
         proc.finished.connect(lambda: self._on_process_finished(proc))
         self._update_processes.append(proc)
         proc.start(prefix[0], prefix[1:] + ssh_cmd)
@@ -460,6 +462,7 @@ class TrayApp(QObject):
             yay_cmd.append("--noconfirm")
         prefix = _terminal_prefix(terminal, f"Removing: {package}")
         proc = QProcess(self)
+        proc.setProperty("host", "local")
         proc.finished.connect(lambda: self._on_process_finished(proc))
         self._update_processes.append(proc)
         proc.start(prefix[0], prefix[1:] + yay_cmd)
@@ -472,15 +475,59 @@ class TrayApp(QObject):
     def _on_process_finished(self, proc: QProcess):
         if proc in self._update_processes:
             self._update_processes.remove(proc)
+        host = proc.property("host")
         proc.deleteLater()
 
-        if proc.property("is_local") and getattr(self, "_self_update_pending", False):
+        if host == "local" and getattr(self, "_self_update_pending", False):
             self._self_update_pending = False
             self._restart_service()
             return
 
-        if not self._update_processes:
-            self.start_check()
+        # Re-check only the computer whose terminal just closed
+        if host == "local":
+            self._recheck_local()
+        elif host:
+            self._recheck_host(host)
+
+    def _recheck_local(self):
+        """Re-check only local packages after a local update/remove."""
+        if self.checker is not None and self.checker.isRunning():
+            return
+        self.checker = UpdateChecker()
+        self.checker.check_complete.connect(self._on_local_recheck_complete)
+        self.checker.check_error.connect(self._on_check_error)
+        self.checker.finished.connect(self._on_thread_finished)
+        self.checker.start()
+
+    def _on_local_recheck_complete(self, result: CheckResult):
+        self.updates = result.updates
+        self.local_result = result
+        self.last_check_time = datetime.now()
+        self._recalc_timers()
+        self._update_tray_state()
+
+    def _recheck_host(self, hostname: str):
+        """Re-check a single remote host after its update terminal closes."""
+        checker = SingleHostChecker(
+            hostname, self.config.tailscale_timeout,
+            ssh_user=self.config.tailscale_ssh_user,
+        )
+        checker.check_complete.connect(self._on_host_recheck_complete)
+        checker.finished.connect(lambda: self._on_host_checker_finished(checker))
+        self._host_checkers.append(checker)
+        checker.start()
+
+    def _on_host_recheck_complete(self, host_result: HostResult):
+        for i, h in enumerate(self.remote_updates):
+            if h.hostname == host_result.hostname:
+                self.remote_updates[i] = host_result
+                break
+        self._update_tray_state()
+
+    def _on_host_checker_finished(self, checker: SingleHostChecker):
+        if checker in self._host_checkers:
+            self._host_checkers.remove(checker)
+        checker.deleteLater()
 
     def _restart_service(self):
         """Restart the systemd user service to pick up the new version."""

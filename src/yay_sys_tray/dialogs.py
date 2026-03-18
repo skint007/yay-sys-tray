@@ -909,6 +909,14 @@ class UpdatesDialog(QDialog):
 
         self.setWindowTitle(f"Available Updates ({total})")
 
+        # Search field
+        self._update_lists: list[_ClickableUpdateList] = []
+        self._search_edit = QLineEdit()
+        self._search_edit.setPlaceholderText("Filter packages...")
+        self._search_edit.setClearButtonEnabled(True)
+        self._search_edit.textChanged.connect(self._filter_updates)
+        content_layout.addWidget(self._search_edit)
+
         if use_tabs:
             tabs = QTabWidget()
 
@@ -950,7 +958,9 @@ class UpdatesDialog(QDialog):
             self._local_needs_restart = needs_restart
             if needs_restart:
                 content_layout.addWidget(_make_restart_banner())
-            content_layout.addWidget(_make_update_list(updates, self._content_widget, on_remove=self._on_remove))
+            lw = _make_update_list(updates, self._content_widget, on_remove=self._on_remove)
+            self._update_lists.append(lw)
+            content_layout.addWidget(lw)
 
             if self.on_update:
                 btn_row = QHBoxLayout()
@@ -975,6 +985,15 @@ class UpdatesDialog(QDialog):
         self._loading_label.hide()
         self._content_widget.show()
 
+    def _filter_updates(self, text: str):
+        text = text.lower()
+        for lw in self._update_lists:
+            for i in range(lw.count()):
+                item = lw.item(i)
+                data = item.data(Qt.ItemDataRole.UserRole)
+                if isinstance(data, UpdateInfo):
+                    item.setHidden(bool(text) and text not in data.package.lower())
+
     def show_loading(self):
         """Show a loading indicator while a check is in progress."""
         self._loading_label.show()
@@ -997,7 +1016,9 @@ class UpdatesDialog(QDialog):
         if needs_restart:
             tab_layout.addWidget(_make_restart_banner())
 
-        tab_layout.addWidget(_make_update_list(updates, widget, on_remove=on_remove))
+        lw = _make_update_list(updates, widget, on_remove=on_remove)
+        self._update_lists.append(lw)
+        tab_layout.addWidget(lw)
 
         if on_update:
             btn_row = QHBoxLayout()

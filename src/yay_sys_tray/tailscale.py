@@ -178,6 +178,21 @@ def check_host(hostname: str, timeout: int, user: str = "") -> HostResult:
         return HostResult(hostname=hostname, error=str(e))
 
 
+class SingleHostChecker(QThread):
+    """Re-check a single remote host after its update terminal closes."""
+    check_complete = pyqtSignal(object)  # HostResult
+
+    def __init__(self, hostname: str, timeout: int, ssh_user: str = ""):
+        super().__init__()
+        self.hostname = hostname
+        self.timeout = timeout
+        self.ssh_user = ssh_user
+
+    def run(self):
+        result = check_host(self.hostname, self.timeout, user=self.ssh_user)
+        self.check_complete.emit(result)
+
+
 class TailscaleChecker(QThread):
     check_complete = pyqtSignal(object)  # RemoteCheckResult
     check_error = pyqtSignal(str)
