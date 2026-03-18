@@ -11,22 +11,52 @@ on:
 jobs:
   aur:
     runs-on: ubuntu-latest
+    container: archlinux:base
 
     steps:
+      - name: Install dependencies
+        run: pacman -Syu --noconfirm git openssh pacman-contrib
+
       - uses: actions/checkout@v4
 
-      - name: Set default branch to master for AUR compatibility
-        run: git config --global init.defaultBranch master
+      - name: Push to AUR
+        env:
+          AUR_SSH_KEY: ${{ secrets.AUR_SSH_PRIVATE_KEY }}
+          AUR_EMAIL: ${{ secrets.AUR_EMAIL }}
+        run: |
+          # Generate .SRCINFO
+          cd aur
+          makepkg --printsrcinfo > .SRCINFO
+          cd ..
 
-      - name: Publish to AUR
-        uses: KSXGitHub/github-actions-deploy-aur@v4.1.1
-        with:
-          pkgname: yay-sys-tray-git
-          pkgbuild: ./aur/PKGBUILD
-          assets: ./aur/*.install
-          commit_username: skint007
-          commit_email: ${{ secrets.AUR_EMAIL }}
-          ssh_private_key: ${{ secrets.AUR_SSH_PRIVATE_KEY }}
-          commit_message: "Update PKGBUILD"
-          force_push: true
-          allow_empty_commits: false
+          # Set up SSH for AUR
+          mkdir -p ~/.ssh
+          echo "$AUR_SSH_KEY" > ~/.ssh/aur
+          chmod 600 ~/.ssh/aur
+          ssh-keyscan aur.archlinux.org >> ~/.ssh/known_hosts 2>/dev/null
+          cat >> ~/.ssh/config <<CFG
+          Host aur.archlinux.org
+            IdentityFile ~/.ssh/aur
+            User aur
+          CFG
+
+          # Clone AUR repo and explicitly checkout master
+          git clone ssh://aur@aur.archlinux.org/yay-sys-tray-git.git /tmp/aur-repo
+          cd /tmp/aur-repo
+          git checkout master 2>/dev/null || git checkout -b master
+
+          # Copy package files
+          cp "$GITHUB_WORKSPACE/aur/PKGBUILD" .
+          cp "$GITHUB_WORKSPACE/aur/"*.install .
+          cp "$GITHUB_WORKSPACE/aur/.SRCINFO" .
+
+          # Commit and push if there are changes
+          git config user.name "skint007"
+          git config user.email "$AUR_EMAIL"
+          git add PKGBUILD .SRCINFO *.install
+          if git diff --cached --quiet; then
+            echo "No changes to push"
+          else
+            git commit -m "Update PKGBUILD"
+            git push origin master
+          fi
