@@ -24,10 +24,10 @@ jobs:
           AUR_SSH_KEY: ${{ secrets.AUR_SSH_PRIVATE_KEY }}
           AUR_EMAIL: ${{ secrets.AUR_EMAIL }}
         run: |
-          # Generate .SRCINFO
-          cd aur
-          makepkg --printsrcinfo > .SRCINFO
-          cd ..
+          # Generate .SRCINFO (makepkg refuses to run as root)
+          useradd -m builder
+          chown -R builder aur
+          su builder -c "cd aur && makepkg --printsrcinfo > .SRCINFO"
 
           # Set up SSH for AUR
           mkdir -p ~/.ssh
