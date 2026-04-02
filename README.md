@@ -6,29 +6,48 @@ A lightweight system tray application for monitoring package updates on Arch Lin
 
 ### Local (Arch Linux)
 
-- Periodic update checking via `checkupdates` and `yay -Qua`
+- Periodic and scheduled update checking via `checkupdates` and `yay -Qua`
 - Tray icon with update count badge and restart-required indicator
 - Per-package info cards with version diff highlighting, repository badges, and restart badges
 - One-click "Update Now" launches `yay -Syu` in your terminal
-- Dependency tree browsing via `pactree` (dependencies and reverse dependencies)
+- Package removal with multiple modes (basic, unneeded deps, full cleanup, force)
+- Dependency tree browsing via `pactree` (forward and reverse dependencies)
 - Package links to archlinux.org and AUR pages
+- Real-time search/filter across all packages
 - Desktop notifications (always, new only, or never)
 - Kernel reboot detection (warns when running kernel differs from installed)
 - Passwordless sudo updates via configurable sudoers rule for pacman
 - Autostart via systemd user service
+- Automatic re-check after update/remove terminal closes
 
 ### Remote (Any OS)
 
 - Monitor remote Arch Linux servers via Tailscale SSH
 - Auto-discover peers by Tailscale device tags
 - Per-server tabs in the updates dialog with remote update buttons
-- Configurable SSH timeout
+- Remote package removal and dependency browsing over SSH
+- Parallel remote checking (up to 8 concurrent connections)
+- "Update All Remote" button for batch updates across multiple servers
+- Automatic re-check of individual hosts after their update terminal closes
+- Configurable SSH user and timeout
 
 ### UI
 
 - Animated tray icon (spinning during checks, bounce on new updates)
-- Configurable animation toggle
-- Re-check cooldown to prevent excessive checking
+- Version diff highlighting (red for old, green for new)
+- Color-coded repository badges (core, extra, multilib, aur)
+- Multi-line tray tooltip with per-host status and next check time
+- Dialog windows remember their size between sessions
+
+## Platform Support
+
+| Platform | Local Updates | Remote Monitoring | Terminal Support |
+|----------|:---:|:---:|---|
+| Arch Linux | Yes | Yes | kitty, alacritty, konsole, foot, xterm |
+| macOS | No | Yes | kitty, alacritty, iTerm2, Terminal.app |
+| Windows (experimental) | No | Yes | Windows Terminal, PowerShell |
+
+On non-Arch systems, local update checking is disabled. Remote server monitoring works on any platform with Tailscale and SSH available.
 
 ## Install
 
@@ -95,9 +114,10 @@ Right-click the tray icon and select **Settings**. Configuration is stored in `~
 
 | Option | Description | Default |
 |---|---|---|
-| Check interval | How often to check for updates | 60 minutes |
+| Check interval | How often to check for updates (can be disabled) | 60 minutes |
+| Scheduled check | Weekly check on a specific day and time | off |
 | Notifications | always, new_only, or never | new_only |
-| Terminal | Terminal emulator for running updates | auto-detected |
+| Terminal | Terminal emulator for running updates (auto-detected) | auto-detected |
 | --noconfirm | Skip yay confirmation prompts (Arch only) | off |
 | Autostart | Enable systemd user service (Arch only) | off |
 | Animations | Animate tray icon (spin/bounce) | on |
@@ -110,6 +130,7 @@ Right-click the tray icon and select **Settings**. Configuration is stored in `~
 |---|---|---|
 | Enable | Check remote servers via Tailscale | off |
 | Device tags | Comma-separated Tailscale tags to filter peers | server,arch |
+| SSH user | Username for SSH connections (blank = current user) | blank |
 | SSH timeout | Seconds before SSH connection times out | 10 |
 
 #### Remote SSH Setup
@@ -124,7 +145,7 @@ ssh-keygen -t ed25519
 ssh-copy-id user@<tailscale-hostname>
 ```
 
-Verify with `ssh user@<tailscale-hostname>` — it should connect without prompting for a password.
+Verify with `ssh user@<tailscale-hostname>` -- it should connect without prompting for a password.
 
 ## License
 
