@@ -6,6 +6,7 @@ from dataclasses import dataclass, field
 from PyQt6.QtCore import QThread, pyqtSignal
 
 from yay_sys_tray.checker import RESTART_PACKAGES, UpdateInfo, parse_update_output
+from yay_sys_tray.config import SUBPROCESS_HIDDEN
 
 SSH_OPTS = [
     "-o", "ServerAliveInterval=5",
@@ -37,6 +38,7 @@ def discover_all_tags() -> list[str]:
             capture_output=True,
             text=True,
             timeout=15,
+            **SUBPROCESS_HIDDEN,
         )
         if result.returncode != 0:
             return []
@@ -61,6 +63,7 @@ def discover_peers(tags: list[str]) -> list[str]:
         capture_output=True,
         text=True,
         timeout=15,
+        **SUBPROCESS_HIDDEN,
     )
     if result.returncode != 0:
         return []
@@ -93,6 +96,7 @@ def _ssh_run(hostname: str, command: str, timeout: int, user: str = "") -> subpr
         capture_output=True,
         text=True,
         timeout=timeout + 30,
+        **SUBPROCESS_HIDDEN,
     )
 
 

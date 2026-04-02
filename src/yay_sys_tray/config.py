@@ -1,9 +1,17 @@
 import getpass
 import json
+import platform
 import shutil
 import subprocess
 from dataclasses import asdict, dataclass
 from pathlib import Path
+
+_IS_WINDOWS = platform.system() == "Windows"
+
+# Keyword args for subprocess.run/Popen to hide console windows on Windows.
+SUBPROCESS_HIDDEN: dict = (
+    {"creationflags": subprocess.CREATE_NO_WINDOW} if _IS_WINDOWS else {}
+)
 
 CONFIG_DIR = Path.home() / ".config" / "yay-sys-tray"
 CONFIG_FILE = CONFIG_DIR / "config.json"
@@ -17,7 +25,17 @@ def is_arch_linux() -> bool:
 
 
 def _detect_terminal() -> str:
-    for term in ("kitty", "alacritty", "konsole", "xterm"):
+    system = platform.system()
+    if system == "Windows":
+        if shutil.which("wt"):
+            return "wt"
+        return "powershell"
+    if system == "Darwin":
+        for term in ("kitty", "alacritty", "iTerm2"):
+            if shutil.which(term):
+                return term
+        return "osascript"
+    for term in ("kitty", "alacritty", "konsole", "foot", "xterm"):
         if shutil.which(term):
             return term
     return "xterm"
@@ -77,7 +95,7 @@ class AppConfig:
         action = "enable" if self.autostart else "disable"
         subprocess.run(
             ["systemctl", "--user", action, SERVICE_NAME],
-            capture_output=True,
+            capture_output=True, **SUBPROCESS_HIDDEN,
         )
 
     SUDOERS_FILE = "/etc/sudoers.d/yay-sys-tray"
@@ -95,12 +113,12 @@ class AppConfig:
                     f'printf "%s\\n" "{rule}" > {self.SUDOERS_FILE}'
                     f" && chmod 440 {self.SUDOERS_FILE}",
                 ],
-                capture_output=True,
+                capture_output=True, **SUBPROCESS_HIDDEN,
             )
             return result.returncode == 0
         else:
             result = subprocess.run(
                 ["pkexec", "rm", "-f", self.SUDOERS_FILE],
-                capture_output=True,
+                capture_output=True, **SUBPROCESS_HIDDEN,
             )
             return result.returncode == 0

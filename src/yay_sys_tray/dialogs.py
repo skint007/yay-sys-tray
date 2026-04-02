@@ -31,7 +31,7 @@ from PyQt6.QtWidgets import (
 )
 
 from yay_sys_tray.checker import RESTART_PACKAGES, UpdateInfo
-from yay_sys_tray.config import AppConfig
+from yay_sys_tray.config import SUBPROCESS_HIDDEN, AppConfig
 from yay_sys_tray.icons import create_app_icon
 from yay_sys_tray.tailscale import discover_all_tags
 
@@ -806,7 +806,7 @@ class DependencyTreeDialog(QDialog):
         text.setFont(QFont("monospace", 10))
 
         try:
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=10, **SUBPROCESS_HIDDEN)
             if result.returncode == 0:
                 output = result.stdout.rstrip()
                 # Count dependencies (exclude the package itself on the first line)

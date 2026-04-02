@@ -4,6 +4,8 @@ from dataclasses import dataclass
 
 from PyQt6.QtCore import QThread, pyqtSignal
 
+from yay_sys_tray.config import SUBPROCESS_HIDDEN
+
 # Packages that require a system restart when updated
 RESTART_PACKAGES = {
     "linux",
@@ -68,7 +70,7 @@ def fetch_descriptions(packages: list[str]) -> dict[str, str]:
     try:
         result = subprocess.run(
             ["pacman", "-Qi"] + packages,
-            capture_output=True, text=True, timeout=10,
+            capture_output=True, text=True, timeout=10, **SUBPROCESS_HIDDEN,
         )
         descriptions: dict[str, str] = {}
         name = None
@@ -89,7 +91,7 @@ def fetch_repositories(packages: list[str]) -> dict[str, tuple[str, str]]:
     try:
         result = subprocess.run(
             ["pacman", "-Si"] + packages,
-            capture_output=True, text=True, timeout=10,
+            capture_output=True, text=True, timeout=10, **SUBPROCESS_HIDDEN,
         )
         repos: dict[str, tuple[str, str]] = {}
         current_repo = ""
@@ -111,7 +113,7 @@ def fetch_repositories(packages: list[str]) -> dict[str, tuple[str, str]]:
 def check_reboot_needed() -> RebootInfo:
     """Check if a reboot is needed by looking for the running kernel's modules."""
     running = subprocess.run(
-        ["uname", "-r"], capture_output=True, text=True,
+        ["uname", "-r"], capture_output=True, text=True, **SUBPROCESS_HIDDEN,
     ).stdout.strip()
 
     modules_exist = os.path.isdir(f"/lib/modules/{running}")
@@ -129,7 +131,7 @@ def check_reboot_needed() -> RebootInfo:
     installed = ""
     try:
         result = subprocess.run(
-            ["pacman", "-Q", pkg], capture_output=True, text=True,
+            ["pacman", "-Q", pkg], capture_output=True, text=True, **SUBPROCESS_HIDDEN,
         )
         if result.returncode == 0:
             parts = result.stdout.strip().split()
@@ -160,6 +162,7 @@ class UpdateChecker(QThread):
                 capture_output=True,
                 text=True,
                 timeout=120,
+                **SUBPROCESS_HIDDEN,
             )
             # checkupdates: exit 0 = updates, exit 2 = no updates, exit 1 = error
             if repo.returncode == 1:
@@ -177,6 +180,7 @@ class UpdateChecker(QThread):
                 capture_output=True,
                 text=True,
                 timeout=120,
+                **SUBPROCESS_HIDDEN,
             )
             # yay -Qua: exit 0 = updates, exit 1 = no updates
             if aur.returncode == 0 and aur.stdout.strip():

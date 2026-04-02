@@ -1,3 +1,4 @@
+import platform
 from datetime import datetime, timedelta
 
 from PyQt6.QtCore import QObject, QProcess, Qt, QTimer
@@ -18,11 +19,16 @@ from yay_sys_tray.icons import (
 from yay_sys_tray.tailscale import HostResult, RemoteCheckResult, SingleHostChecker, TailscaleChecker
 
 TERMINAL_CMDS = {
+    # Linux
     "kitty": ["kitty", "--hold"],
     "konsole": ["konsole", "--hold", "-e"],
     "alacritty": ["alacritty", "--hold", "-e"],
     "foot": ["foot", "--hold"],
     "xterm": ["xterm", "-hold", "-e"],
+    # Windows
+    "wt": ["wt", "new-tab", "--"],
+    "powershell": ["powershell", "-NoExit", "-Command"],
+    # macOS — "osascript" is a special case handled in _terminal_prefix
 }
 
 TERMINAL_TITLE_FLAG = {
@@ -31,11 +37,20 @@ TERMINAL_TITLE_FLAG = {
     "alacritty": "--title",
     "foot": "--title",
     "xterm": "-T",
+    "wt": "--title",
+    "powershell": None,
+    "osascript": None,
 }
 
 
 def _terminal_prefix(terminal: str, title: str | None = None) -> list[str]:
     """Build the terminal command prefix, optionally setting the window title."""
+    # macOS: use osascript to launch Terminal.app
+    if terminal == "osascript":
+        # The actual command will be joined and passed as a shell string
+        # Caller appends the command args after this prefix
+        return ["open", "-a", "Terminal"]
+
     base = list(TERMINAL_CMDS.get(terminal, [terminal, "-e"]))
     if title:
         flag = TERMINAL_TITLE_FLAG.get(terminal, "--title")
