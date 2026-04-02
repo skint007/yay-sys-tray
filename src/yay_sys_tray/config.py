@@ -8,10 +8,12 @@ from pathlib import Path
 
 _IS_WINDOWS = platform.system() == "Windows"
 
-# Keyword args for subprocess.run/Popen to hide console windows on Windows.
-SUBPROCESS_HIDDEN: dict = (
-    {"creationflags": subprocess.CREATE_NO_WINDOW} if _IS_WINDOWS else {}
-)
+# Keyword args for subprocess.run/Popen to hide console windows on Windows
+# and ensure UTF-8 decoding on all platforms (Windows defaults to cp1252).
+SUBPROCESS_HIDDEN: dict = {
+    "encoding": "utf-8",
+    **({"creationflags": subprocess.CREATE_NO_WINDOW} if _IS_WINDOWS else {}),
+}
 
 CONFIG_DIR = Path.home() / ".config" / "yay-sys-tray"
 CONFIG_FILE = CONFIG_DIR / "config.json"
