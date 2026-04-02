@@ -467,6 +467,21 @@ class TrayApp(QObject):
         self._update_processes.append(proc)
         proc.start(prefix[0], prefix[1:] + yay_cmd)
 
+    def _run_remote_remove(self, hostname: str, package: str, flags: str):
+        terminal = self.config.terminal
+        cmd = f"sudo pacman -{flags} {package}"
+        if self.config.noconfirm:
+            cmd += " --noconfirm"
+        user = self.config.tailscale_ssh_user
+        target = f"{user}@{hostname}" if user else hostname
+        ssh_cmd = ["ssh", target, cmd]
+        prefix = _terminal_prefix(terminal, f"Removing: {package} ({hostname})")
+        proc = QProcess(self)
+        proc.setProperty("host", hostname)
+        proc.finished.connect(lambda: self._on_process_finished(proc))
+        self._update_processes.append(proc)
+        proc.start(prefix[0], prefix[1:] + ssh_cmd)
+
     def _run_all_remote_updates(self):
         for host in self.remote_updates:
             if host.updates:
@@ -558,6 +573,8 @@ class TrayApp(QObject):
             on_remote_update=self._run_remote_update,
             on_update_all_remote=self._run_all_remote_updates,
             on_remove=self._run_remove if self.is_arch else None,
+            on_remote_remove=self._run_remote_remove,
+            ssh_user=self.config.tailscale_ssh_user,
         )
         self._updates_dialog.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
         self._updates_dialog.destroyed.connect(self._on_updates_dialog_closed)

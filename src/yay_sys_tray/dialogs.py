@@ -686,9 +686,10 @@ class UpdateItemDelegate(QStyledItemDelegate):
 class _ClickableUpdateList(QListWidget):
     """QListWidget that handles icon clicks on update cards."""
 
-    def __init__(self, parent=None, on_remove: Callable[[str, str], None] | None = None):
+    def __init__(self, parent=None, on_remove: Callable[[str, str], None] | None = None, ssh_target: str = ""):
         super().__init__(parent)
         self._on_remove = on_remove
+        self._ssh_target = ssh_target
 
     def mouseReleaseEvent(self, event):
         pos = event.position().toPoint()
@@ -704,10 +705,10 @@ class _ClickableUpdateList(QListWidget):
                         QDesktopServices.openUrl(QUrl(data.url))
                         return
                     if icon == "deps":
-                        DependencyTreeDialog(data.package, reverse=False, parent=self).exec()
+                        DependencyTreeDialog(data.package, reverse=False, ssh_target=self._ssh_target, parent=self).exec()
                         return
                     if icon == "rdeps":
-                        DependencyTreeDialog(data.package, reverse=True, parent=self).exec()
+                        DependencyTreeDialog(data.package, reverse=True, ssh_target=self._ssh_target, parent=self).exec()
                         return
                     if icon == "remove" and self._on_remove:
                         self._show_remove_menu(data.package, event.globalPosition().toPoint())
@@ -750,13 +751,14 @@ def _make_update_list(
     updates: list[UpdateInfo],
     parent: QWidget,
     on_remove: Callable[[str, str], None] | None = None,
+    ssh_target: str = "",
 ) -> _ClickableUpdateList:
     """Create a styled QListWidget populated with update cards."""
     sorted_updates = sorted(
         updates,
         key=lambda u: (u.package not in RESTART_PACKAGES, u.package.lower()),
     )
-    lw = _ClickableUpdateList(parent, on_remove=on_remove)
+    lw = _ClickableUpdateList(parent, on_remove=on_remove, ssh_target=ssh_target)
     lw.setItemDelegate(UpdateItemDelegate(lw))
     lw.setSelectionMode(_ClickableUpdateList.SelectionMode.NoSelection)
     lw.setFocusPolicy(Qt.FocusPolicy.NoFocus)
@@ -776,14 +778,18 @@ def _make_update_list(
 class DependencyTreeDialog(QDialog):
     """Show the output of pactree for a package."""
 
-    def __init__(self, package: str, reverse: bool = False, parent=None):
+    def __init__(self, package: str, reverse: bool = False, ssh_target: str = "", parent=None):
         import subprocess
 
         super().__init__(parent)
         self._settings_key = "rdeps_dialog/size" if reverse else "deps_dialog/size"
 
         label = "Required by" if reverse else "Dependencies"
-        cmd = ["pactree", "-r", package] if reverse else ["pactree", package]
+        pactree_cmd = ["pactree", "-r", package] if reverse else ["pactree", package]
+        if ssh_target:
+            cmd = ["ssh", ssh_target, " ".join(pactree_cmd)]
+        else:
+            cmd = pactree_cmd
 
         self.setWindowTitle(f"{label}: {package}")
         self.setWindowIcon(create_app_icon())
@@ -855,6 +861,8 @@ class UpdatesDialog(QDialog):
         on_remote_update: Callable[[str, bool], None] | None = None,
         on_update_all_remote: Callable[[], None] | None = None,
         on_remove: Callable[[str, str], None] | None = None,
+        on_remote_remove: Callable[[str, str, str], None] | None = None,
+        ssh_user: str = "",
         parent=None,
     ):
         super().__init__(parent)
@@ -862,6 +870,8 @@ class UpdatesDialog(QDialog):
         self._on_remote_update = on_remote_update
         self._on_update_all_remote = on_update_all_remote
         self._on_remove = on_remove
+        self._on_remote_remove = on_remote_remove
+        self._ssh_user = ssh_user
         self._local_needs_restart = False
 
         self.setWindowIcon(create_app_icon())
@@ -933,7 +943,11 @@ class UpdatesDialog(QDialog):
                 remote_cb = None
                 if self._on_remote_update:
                     remote_cb = lambda restart, _h=host.hostname: self._on_remote_update(_h, restart)
-                tab = self._build_tab(host.updates, host.needs_restart, remote_cb)
+                remote_remove_cb = None
+                if self._on_remote_remove:
+                    remote_remove_cb = lambda pkg, flags, _h=host.hostname: self._on_remote_remove(_h, pkg, flags)
+                ssh_target = f"{self._ssh_user}@{host.hostname}" if self._ssh_user else host.hostname
+                tab = self._build_tab(host.updates, host.needs_restart, remote_cb, on_remove=remote_remove_cb, ssh_target=ssh_target)
                 tab_label = f"{host.hostname} ({len(host.updates)})"
                 idx = tabs.addTab(tab, tab_label)
                 if host.needs_restart:
@@ -1008,6 +1022,7 @@ class UpdatesDialog(QDialog):
         needs_restart: bool,
         on_update: Callable[[bool], None] | None = None,
         on_remove: Callable[[str, str], None] | None = None,
+        ssh_target: str = "",
     ) -> QWidget:
         widget = QWidget()
         tab_layout = QVBoxLayout(widget)
@@ -1016,7 +1031,7 @@ class UpdatesDialog(QDialog):
         if needs_restart:
             tab_layout.addWidget(_make_restart_banner())
 
-        lw = _make_update_list(updates, widget, on_remove=on_remove)
+        lw = _make_update_list(updates, widget, on_remove=on_remove, ssh_target=ssh_target)
         self._update_lists.append(lw)
         tab_layout.addWidget(lw)
 
