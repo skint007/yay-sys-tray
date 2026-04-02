@@ -17,7 +17,7 @@ jobs:
       - name: Install dependencies
         run: pacman -Syu --noconfirm git openssh pacman-contrib
 
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Push to AUR
         env:
@@ -53,5 +53,7 @@ jobs:
             echo "No changes to push"
           else
             git commit -m "Update PKGBUILD"
-            git push origin master
+            # Force push: AUR history is disposable, and concurrent
+            # workflow runs (branch + tag triggers) can race each other.
+            git push --force origin master
           fi
