@@ -18,17 +18,30 @@ from yay_sys_tray.icons import (
 )
 from yay_sys_tray.tailscale import HostResult, RemoteCheckResult, SingleHostChecker, TailscaleChecker
 
+# Base terminal commands (without hold flags).
 TERMINAL_CMDS = {
     # Linux
-    "kitty": ["kitty", "--hold"],
-    "konsole": ["konsole", "--hold", "-e"],
-    "alacritty": ["alacritty", "--hold", "-e"],
-    "foot": ["foot", "--hold"],
-    "xterm": ["xterm", "-hold", "-e"],
+    "kitty": ["kitty"],
+    "konsole": ["konsole", "-e"],
+    "alacritty": ["alacritty", "-e"],
+    "foot": ["foot"],
+    "xterm": ["xterm", "-e"],
     # Windows
     "wt": ["wt", "new-tab", "--"],
-    "powershell": ["powershell", "-NoExit", "-Command"],
+    "powershell": ["powershell", "-Command"],
     # macOS — "osascript" is a special case handled in _terminal_prefix
+}
+
+# Flags to keep the terminal open after the command exits.
+TERMINAL_HOLD_FLAG = {
+    "kitty": "--hold",
+    "konsole": "--hold",
+    "alacritty": "--hold",
+    "foot": "--hold",
+    "xterm": "-hold",
+    "wt": None,
+    "powershell": "-NoExit",
+    "osascript": None,
 }
 
 TERMINAL_TITLE_FLAG = {
@@ -43,19 +56,23 @@ TERMINAL_TITLE_FLAG = {
 }
 
 
-def _terminal_prefix(terminal: str, title: str | None = None) -> list[str]:
+def _terminal_prefix(terminal: str, title: str | None = None, hold: bool = True) -> list[str]:
     """Build the terminal command prefix, optionally setting the window title."""
     # macOS: use osascript to launch Terminal.app
     if terminal == "osascript":
-        # The actual command will be joined and passed as a shell string
-        # Caller appends the command args after this prefix
         return ["open", "-a", "Terminal"]
 
     base = list(TERMINAL_CMDS.get(terminal, [terminal, "-e"]))
+
+    # Insert hold flag after the program name so it's treated as a terminal arg
+    if hold:
+        hold_flag = TERMINAL_HOLD_FLAG.get(terminal, "--hold")
+        if hold_flag:
+            base.insert(1, hold_flag)
+
     if title:
         flag = TERMINAL_TITLE_FLAG.get(terminal, "--title")
         if flag:
-            # Insert title flag before -e (if present) so it's treated as a terminal arg
             try:
                 e_idx = base.index("-e")
                 base[e_idx:e_idx] = [flag, title]
@@ -446,7 +463,7 @@ class TrayApp(QObject):
             yay_cmd = ["yay", "-Syu"]
             if self.config.noconfirm:
                 yay_cmd.append("--noconfirm")
-        prefix = _terminal_prefix(terminal, "Updating: local")
+        prefix = _terminal_prefix(terminal, "Updating: local", hold=self.config.hold_terminal)
         proc = QProcess(self)
         proc.setProperty("host", "local")
         proc.finished.connect(lambda: self._on_process_finished(proc))
@@ -463,7 +480,7 @@ class TrayApp(QObject):
         user = self.config.tailscale_ssh_user
         target = f"{user}@{hostname}" if user else hostname
         ssh_cmd = ["ssh", target, cmd]
-        prefix = _terminal_prefix(terminal, f"Updating: {hostname}")
+        prefix = _terminal_prefix(terminal, f"Updating: {hostname}", hold=self.config.hold_terminal)
         proc = QProcess(self)
         proc.setProperty("host", hostname)
         proc.finished.connect(lambda: self._on_process_finished(proc))
@@ -475,7 +492,7 @@ class TrayApp(QObject):
         yay_cmd = ["yay", f"-{flags}", package]
         if self.config.noconfirm:
             yay_cmd.append("--noconfirm")
-        prefix = _terminal_prefix(terminal, f"Removing: {package}")
+        prefix = _terminal_prefix(terminal, f"Removing: {package}", hold=self.config.hold_terminal)
         proc = QProcess(self)
         proc.setProperty("host", "local")
         proc.finished.connect(lambda: self._on_process_finished(proc))
@@ -490,7 +507,7 @@ class TrayApp(QObject):
         user = self.config.tailscale_ssh_user
         target = f"{user}@{hostname}" if user else hostname
         ssh_cmd = ["ssh", target, cmd]
-        prefix = _terminal_prefix(terminal, f"Removing: {package} ({hostname})")
+        prefix = _terminal_prefix(terminal, f"Removing: {package} ({hostname})", hold=self.config.hold_terminal)
         proc = QProcess(self)
         proc.setProperty("host", hostname)
         proc.finished.connect(lambda: self._on_process_finished(proc))

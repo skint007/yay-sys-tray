@@ -267,6 +267,10 @@ class SettingsDialog(QDialog):
         self.noconfirm_check.setEnabled(is_arch)
         general_layout.addRow("--noconfirm:", self.noconfirm_check)
 
+        self.hold_terminal_check = QCheckBox("Keep terminal open after command finishes")
+        self.hold_terminal_check.setChecked(config.hold_terminal)
+        general_layout.addRow("Hold terminal:", self.hold_terminal_check)
+
         self.autostart_check = QCheckBox("Start on login")
         self.autostart_check.setChecked(config.autostart if is_arch else False)
         self.autostart_check.setEnabled(is_arch)
@@ -336,6 +340,7 @@ class SettingsDialog(QDialog):
             notify=self.notify_combo.currentText(),
             terminal=self.terminal_edit.text().strip(),
             noconfirm=self.noconfirm_check.isChecked(),
+            hold_terminal=self.hold_terminal_check.isChecked(),
             autostart=self.autostart_check.isChecked(),
             animations=self.animations_check.isChecked(),
             recheck_interval_minutes=self.recheck_spin.value(),

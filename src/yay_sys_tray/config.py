@@ -50,6 +50,7 @@ class AppConfig:
     notify: str = "new_only"  # "always" | "new_only" | "never"
     terminal: str = ""
     noconfirm: bool = False
+    hold_terminal: bool = True
     autostart: bool = False
     animations: bool = True
     recheck_interval_minutes: int = 5
