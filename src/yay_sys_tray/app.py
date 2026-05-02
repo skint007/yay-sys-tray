@@ -514,10 +514,11 @@ class TrayApp(QObject):
         self._update_processes.append(proc)
         proc.start(prefix[0], prefix[1:] + ssh_cmd)
 
-    def _run_all_remote_updates(self):
+    def _run_all_remote_updates(self, restart: bool = True):
         for host in self.remote_updates:
             if host.updates:
-                self._run_remote_update(host.hostname, restart=host.needs_restart)
+                host_restart = restart and host.needs_restart
+                self._run_remote_update(host.hostname, restart=host_restart)
 
     def _on_process_finished(self, proc: QProcess):
         if proc in self._update_processes:

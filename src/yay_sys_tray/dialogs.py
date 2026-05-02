@@ -864,7 +864,7 @@ class UpdatesDialog(QDialog):
         remote_hosts: list | None = None,
         on_update: Callable[[bool], None] | None = None,
         on_remote_update: Callable[[str, bool], None] | None = None,
-        on_update_all_remote: Callable[[], None] | None = None,
+        on_update_all_remote: Callable[[bool], None] | None = None,
         on_remove: Callable[[str, str], None] | None = None,
         on_remote_remove: Callable[[str, str, str], None] | None = None,
         ssh_user: str = "",
@@ -966,11 +966,22 @@ class UpdatesDialog(QDialog):
             content_layout.addWidget(tabs)
 
             if self._on_update_all_remote and len(remote_with_updates) > 1:
+                any_needs_restart = any(h.needs_restart for h in remote_with_updates)
                 all_btn_row = QHBoxLayout()
                 all_btn_row.addStretch()
-                all_btn = QPushButton(f"Update All Remote ({len(remote_with_updates)})")
-                all_btn.clicked.connect(self._on_update_all_remote)
-                all_btn_row.addWidget(all_btn)
+                if any_needs_restart:
+                    split_btn = QToolButton()
+                    split_btn.setText(f"Update All && Restart ({len(remote_with_updates)})")
+                    split_btn.setPopupMode(QToolButton.ToolButtonPopupMode.MenuButtonPopup)
+                    split_btn.clicked.connect(lambda: self._on_update_all_remote(True))
+                    menu = QMenu(split_btn)
+                    menu.addAction("Update All (no restart)", lambda: self._on_update_all_remote(False))
+                    split_btn.setMenu(menu)
+                    all_btn_row.addWidget(split_btn)
+                else:
+                    all_btn = QPushButton(f"Update All Remote ({len(remote_with_updates)})")
+                    all_btn.clicked.connect(lambda: self._on_update_all_remote(False))
+                    all_btn_row.addWidget(all_btn)
                 content_layout.addLayout(all_btn_row)
         else:
             needs_restart = any(u.package in RESTART_PACKAGES for u in updates)
