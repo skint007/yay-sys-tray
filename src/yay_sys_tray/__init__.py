@@ -9,7 +9,7 @@ def _get_version() -> str:
     On a tagged commit (e.g. v1.0.0):         returns '1.0.0'
     After a tag (e.g. v1.0.0, 3 commits on):  returns '1.0.0.3.abc1234'
     No tags at all:                            returns 'r{count}.{short}'
-    Not a git repo (installed package):        returns '0.1.0'
+    Not a git repo (installed package):        returns installed-package metadata version
     """
     try:
         src = Path(__file__).parent
@@ -35,7 +35,12 @@ def _get_version() -> str:
             return f"r{count}.{short}"
     except Exception:
         pass
-    return "0.1.0"
+    try:
+        from importlib.metadata import version
+        return version("yay-sys-tray")
+    except Exception:
+        pass
+    return "0.0.0"
 
 
 __version__ = _get_version()

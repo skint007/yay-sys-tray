@@ -29,6 +29,7 @@ pkgver() {
 
 build() {
     cd yay-sys-tray
+    sed -i "s/^version = \".*\"/version = \"${pkgver}\"/" pyproject.toml
     python -m build --wheel --no-isolation
 }
 
