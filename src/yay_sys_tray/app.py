@@ -457,7 +457,8 @@ class TrayApp(QObject):
             cmd = "yay -Syu"
             if self.config.noconfirm:
                 cmd += " --noconfirm"
-            cmd += " && sudo reboot"
+            reboot_cmd = "systemctl reboot" if self.config.passwordless_updates else "sudo reboot"
+            cmd += f" && {reboot_cmd}"
             yay_cmd = ["bash", "-c", cmd]
         else:
             yay_cmd = ["yay", "-Syu"]
