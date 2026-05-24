@@ -609,6 +609,7 @@ class TrayApp(QObject):
             on_remove=self._run_remove if self.is_arch else None,
             on_remote_remove=self._run_remote_remove,
             ssh_user=self.config.tailscale_ssh_user,
+            vertical_tabs=self.config.vertical_update_tabs,
         )
         self._updates_dialog.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
         self._updates_dialog.destroyed.connect(self._on_updates_dialog_closed)

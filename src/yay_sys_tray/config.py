@@ -60,6 +60,7 @@ class AppConfig:
     tailscale_tags: str = "server,arch"
     tailscale_timeout: int = 10
     tailscale_ssh_user: str = ""
+    vertical_update_tabs: bool = False
     # Scheduled check (in addition to interval)
     scheduled_check_enabled: bool = False
     scheduled_check_day: int = 5  # 0=Mon .. 6=Sun, default Saturday

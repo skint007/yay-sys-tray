@@ -17,10 +17,14 @@ from PyQt6.QtWidgets import (
     QLineEdit,
     QListWidget,
     QListWidgetItem,
+    QProxyStyle,
     QPushButton,
     QSpinBox,
+    QStyle,
+    QStyleOptionTab,
     QStyledItemDelegate,
     QStyleOptionViewItem,
+    QTabBar,
     QTabWidget,
     QTextEdit,
     QTimeEdit,
@@ -316,6 +320,10 @@ class SettingsDialog(QDialog):
         self.tailscale_timeout_spin.setValue(config.tailscale_timeout)
         tailscale_layout.addRow("SSH timeout:", self.tailscale_timeout_spin)
 
+        self.vertical_tabs_check = QCheckBox("Show update window tabs vertically on the left")
+        self.vertical_tabs_check.setChecked(config.vertical_update_tabs)
+        tailscale_layout.addRow("Tab layout:", self.vertical_tabs_check)
+
         self.tailscale_enabled_check.toggled.connect(self.tag_pills.setEnabled)
         self.tailscale_enabled_check.toggled.connect(self.ssh_user_edit.setEnabled)
         self.tailscale_enabled_check.toggled.connect(self.tailscale_timeout_spin.setEnabled)
@@ -349,6 +357,7 @@ class SettingsDialog(QDialog):
             tailscale_tags=",".join(self.tag_pills.selected()),
             tailscale_timeout=self.tailscale_timeout_spin.value(),
             tailscale_ssh_user=self.ssh_user_edit.text().strip(),
+            vertical_update_tabs=self.vertical_tabs_check.isChecked(),
             scheduled_check_enabled=self.scheduled_check.isChecked(),
             scheduled_check_day=self.scheduled_day.currentIndex(),
             scheduled_check_time=self.scheduled_time.time().toString("HH:mm"),
@@ -857,6 +866,29 @@ def _make_restart_banner() -> QLabel:
     return label
 
 
+class _HorizontalTabStyle(QProxyStyle):
+    """Render left-side (West) tabs with upright, horizontal labels.
+
+    Qt rotates West/East tab text 90° by default, which is hard to read.
+    This widens the tab to fit horizontal text and draws the label as if it
+    were a top tab.
+    """
+
+    def sizeFromContents(self, contents_type, option, size, widget):
+        s = super().sizeFromContents(contents_type, option, size, widget)
+        if contents_type == QStyle.ContentsType.CT_TabBarTab:
+            s.transpose()
+        return s
+
+    def drawControl(self, element, option, painter, widget):
+        if element == QStyle.ControlElement.CE_TabBarTabLabel and isinstance(option, QStyleOptionTab):
+            opt = QStyleOptionTab(option)
+            opt.shape = QTabBar.Shape.RoundedNorth
+            super().drawControl(element, opt, painter, widget)
+            return
+        super().drawControl(element, option, painter, widget)
+
+
 class UpdatesDialog(QDialog):
     def __init__(
         self,
@@ -868,6 +900,7 @@ class UpdatesDialog(QDialog):
         on_remove: Callable[[str, str], None] | None = None,
         on_remote_remove: Callable[[str, str, str], None] | None = None,
         ssh_user: str = "",
+        vertical_tabs: bool = False,
         parent=None,
     ):
         super().__init__(parent)
@@ -877,6 +910,7 @@ class UpdatesDialog(QDialog):
         self._on_remove = on_remove
         self._on_remote_remove = on_remote_remove
         self._ssh_user = ssh_user
+        self._vertical_tabs = vertical_tabs
         self._local_needs_restart = False
 
         self.setWindowIcon(create_app_icon())
@@ -934,6 +968,12 @@ class UpdatesDialog(QDialog):
 
         if use_tabs:
             tabs = QTabWidget()
+            if self._vertical_tabs:
+                tabs.setTabPosition(QTabWidget.TabPosition.West)
+                tab_style = _HorizontalTabStyle()
+                tab_style.setParent(tabs)
+                tabs.tabBar().setStyle(tab_style)
+                tabs.tabBar().setExpanding(False)
 
             if updates:
                 local_needs_restart = any(u.package in RESTART_PACKAGES for u in updates)
