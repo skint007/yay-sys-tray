@@ -532,10 +532,11 @@ class TrayApp(QObject):
                 self._run_remote_update(host.hostname, restart=host_restart)
 
     def _run_selected_remote_updates(self, hostnames: list[str], restart: bool = True):
-        # Explicit selection: restart applies to every selected host, not just
-        # those flagged needs_restart, so a manual reboot can be forced.
+        by_name = {h.hostname: h for h in self.remote_updates}
         for hostname in hostnames:
-            self._run_remote_update(hostname, restart=restart)
+            host = by_name.get(hostname)
+            host_restart = restart and host is not None and host.needs_restart
+            self._run_remote_update(hostname, restart=host_restart)
 
     def _on_process_finished(self, proc: QProcess):
         if proc in self._update_processes:
