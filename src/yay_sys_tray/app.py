@@ -458,7 +458,7 @@ class TrayApp(QObject):
             if self.config.noconfirm:
                 cmd += " --noconfirm"
             reboot_cmd = "systemctl reboot" if self.config.passwordless_updates else "sudo reboot"
-            cmd += f" && {reboot_cmd}"
+            cmd += f" && {self._delayed_reboot_cmd(reboot_cmd)}"
             yay_cmd = ["bash", "-c", cmd]
         else:
             yay_cmd = ["yay", "-Syu"]
@@ -471,13 +471,23 @@ class TrayApp(QObject):
         self._update_processes.append(proc)
         proc.start(prefix[0], prefix[1:] + yay_cmd)
 
+    def _delayed_reboot_cmd(self, reboot_cmd: str) -> str:
+        """Wrap a reboot command with the configured delay (Ctrl+C cancels)."""
+        delay = self.config.restart_delay_seconds
+        if delay <= 0:
+            return reboot_cmd
+        return (
+            f"echo 'Rebooting in {delay}s (Ctrl+C to cancel)...'"
+            f" && sleep {delay} && {reboot_cmd}"
+        )
+
     def _run_remote_update(self, hostname: str, restart: bool = False):
         terminal = self.config.terminal
         cmd = "sudo pacman -Syu"
         if self.config.noconfirm:
             cmd += " --noconfirm"
         if restart:
-            cmd += " && sudo reboot"
+            cmd += f" && {self._delayed_reboot_cmd('sudo reboot')}"
         user = self.config.tailscale_ssh_user
         target = f"{user}@{hostname}" if user else hostname
         ssh_cmd = ["ssh", target, cmd]
@@ -520,6 +530,12 @@ class TrayApp(QObject):
             if host.updates:
                 host_restart = restart and host.needs_restart
                 self._run_remote_update(host.hostname, restart=host_restart)
+
+    def _run_selected_remote_updates(self, hostnames: list[str], restart: bool = True):
+        # Explicit selection: restart applies to every selected host, not just
+        # those flagged needs_restart, so a manual reboot can be forced.
+        for hostname in hostnames:
+            self._run_remote_update(hostname, restart=restart)
 
     def _on_process_finished(self, proc: QProcess):
         if proc in self._update_processes:
@@ -606,6 +622,7 @@ class TrayApp(QObject):
             on_update=self._run_local_update if self.is_arch else None,
             on_remote_update=self._run_remote_update,
             on_update_all_remote=self._run_all_remote_updates,
+            on_update_selected=self._run_selected_remote_updates,
             on_remove=self._run_remove if self.is_arch else None,
             on_remote_remove=self._run_remote_remove,
             ssh_user=self.config.tailscale_ssh_user,

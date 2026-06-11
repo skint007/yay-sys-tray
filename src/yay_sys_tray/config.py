@@ -55,6 +55,8 @@ class AppConfig:
     animations: bool = True
     recheck_interval_minutes: int = 5
     passwordless_updates: bool = False
+    # Seconds to wait after an update finishes before rebooting (0 = immediate)
+    restart_delay_seconds: int = 0
     # Tailscale remote checking
     tailscale_enabled: bool = False
     tailscale_tags: str = "server,arch"

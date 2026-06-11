@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Callable
 
-from PyQt6.QtCore import QEvent, QPointF, QRectF, QSettings, QSize, Qt, QTime, QUrl
+from PyQt6.QtCore import QEvent, QPointF, QRect, QRectF, QSettings, QSize, Qt, QTime, QUrl
 from PyQt6.QtGui import QColor, QDesktopServices, QFont, QPainter, QPainterPath, QPen
 from PyQt6.QtWidgets import QMenu, QToolTip
 from PyQt6.QtWidgets import (
@@ -295,6 +295,17 @@ class SettingsDialog(QDialog):
         self.passwordless_check.setEnabled(is_arch)
         general_layout.addRow("Passwordless:", self.passwordless_check)
 
+        self.restart_delay_spin = QSpinBox()
+        self.restart_delay_spin.setRange(0, 600)
+        self.restart_delay_spin.setSuffix(" seconds")
+        self.restart_delay_spin.setSpecialValueText("Immediate")
+        self.restart_delay_spin.setValue(config.restart_delay_seconds)
+        self.restart_delay_spin.setToolTip(
+            "Wait this long after an update finishes before rebooting\n"
+            "(lets post-upgrade hooks settle; Ctrl+C in the terminal cancels the reboot)"
+        )
+        general_layout.addRow("Restart delay:", self.restart_delay_spin)
+
         tabs.addTab(general_widget, "General")
 
         # --- Tailscale Tab ---
@@ -353,6 +364,7 @@ class SettingsDialog(QDialog):
             animations=self.animations_check.isChecked(),
             recheck_interval_minutes=self.recheck_spin.value(),
             passwordless_updates=self.passwordless_check.isChecked(),
+            restart_delay_seconds=self.restart_delay_spin.value(),
             tailscale_enabled=self.tailscale_enabled_check.isChecked(),
             tailscale_tags=",".join(self.tag_pills.selected()),
             tailscale_timeout=self.tailscale_timeout_spin.value(),
@@ -888,6 +900,30 @@ class _HorizontalTabStyle(QProxyStyle):
             return
         super().drawControl(element, option, painter, widget)
 
+    def subElementRect(self, element, option, widget):
+        # Position tab-bar side buttons (e.g. selection checkboxes) ourselves:
+        # base styles (Breeze, kvantum, ...) return broken rects for buttons
+        # on West tab bars, leaving them stacked on the first tab.
+        if element in (
+            QStyle.SubElement.SE_TabBarTabLeftButton,
+            QStyle.SubElement.SE_TabBarTabRightButton,
+        ) and isinstance(option, QStyleOptionTab):
+            left = element == QStyle.SubElement.SE_TabBarTabLeftButton
+            size = option.leftButtonSize if left else option.rightButtonSize
+            if not size.isValid():
+                return QRect()
+            r = option.rect
+            pad = 6
+            y = r.center().y() - size.height() // 2
+            if left:
+                return QRect(r.left() + pad, y, size.width(), size.height())
+            return QRect(r.right() - pad - size.width(), y, size.width(), size.height())
+        if element == QStyle.SubElement.SE_TabBarTabText and isinstance(option, QStyleOptionTab):
+            opt = QStyleOptionTab(option)
+            opt.shape = QTabBar.Shape.RoundedNorth
+            return super().subElementRect(element, opt, widget)
+        return super().subElementRect(element, option, widget)
+
 
 class UpdatesDialog(QDialog):
     def __init__(
@@ -897,6 +933,7 @@ class UpdatesDialog(QDialog):
         on_update: Callable[[bool], None] | None = None,
         on_remote_update: Callable[[str, bool], None] | None = None,
         on_update_all_remote: Callable[[bool], None] | None = None,
+        on_update_selected: Callable[[list[str], bool], None] | None = None,
         on_remove: Callable[[str, str], None] | None = None,
         on_remote_remove: Callable[[str, str, str], None] | None = None,
         ssh_user: str = "",
@@ -907,11 +944,16 @@ class UpdatesDialog(QDialog):
         self.on_update = on_update
         self._on_remote_update = on_remote_update
         self._on_update_all_remote = on_update_all_remote
+        self._on_update_selected = on_update_selected
         self._on_remove = on_remove
         self._on_remote_remove = on_remote_remove
         self._ssh_user = ssh_user
         self._vertical_tabs = vertical_tabs
         self._local_needs_restart = False
+        # Hostnames ticked for "Update Selected" — survives refresh()
+        self._selected_hostnames: set[str] = set()
+        self._host_checkboxes: dict[str, QCheckBox] = {}
+        self._selected_btn: QToolButton | None = None
 
         self.setWindowIcon(create_app_icon())
         self.setMinimumSize(300, 300)
@@ -960,6 +1002,8 @@ class UpdatesDialog(QDialog):
 
         # Search field
         self._update_lists: list[_ClickableUpdateList] = []
+        self._host_checkboxes = {}
+        self._selected_btn = None
         self._search_edit = QLineEdit()
         self._search_edit.setPlaceholderText("Filter packages...")
         self._search_edit.setClearButtonEnabled(True)
@@ -998,6 +1042,16 @@ class UpdatesDialog(QDialog):
                 if host.needs_restart:
                     tabs.setTabToolTip(idx, "Restart required")
 
+                if self._on_update_selected:
+                    sel_cb = QCheckBox()
+                    sel_cb.setToolTip("Include in 'Update Selected'")
+                    sel_cb.setChecked(host.hostname in self._selected_hostnames)
+                    sel_cb.toggled.connect(
+                        lambda checked, _h=host.hostname: self._on_host_selection_toggled(_h, checked)
+                    )
+                    tabs.tabBar().setTabButton(idx, QTabBar.ButtonPosition.LeftSide, sel_cb)
+                    self._host_checkboxes[host.hostname] = sel_cb
+
             for i in range(tabs.count()):
                 tooltip = tabs.tabToolTip(i)
                 if tooltip == "Restart required":
@@ -1005,23 +1059,40 @@ class UpdatesDialog(QDialog):
 
             content_layout.addWidget(tabs)
 
-            if self._on_update_all_remote and len(remote_with_updates) > 1:
+            show_selected_btn = bool(self._on_update_selected and self._host_checkboxes)
+            if show_selected_btn or (self._on_update_all_remote and len(remote_with_updates) > 1):
                 any_needs_restart = any(h.needs_restart for h in remote_with_updates)
                 all_btn_row = QHBoxLayout()
                 all_btn_row.addStretch()
-                if any_needs_restart:
-                    split_btn = QToolButton()
-                    split_btn.setText(f"Update All && Restart ({len(remote_with_updates)})")
-                    split_btn.setPopupMode(QToolButton.ToolButtonPopupMode.MenuButtonPopup)
-                    split_btn.clicked.connect(lambda: self._on_update_all_remote(True))
-                    menu = QMenu(split_btn)
-                    menu.addAction("Update All (no restart)", lambda: self._on_update_all_remote(False))
-                    split_btn.setMenu(menu)
-                    all_btn_row.addWidget(split_btn)
-                else:
-                    all_btn = QPushButton(f"Update All Remote ({len(remote_with_updates)})")
-                    all_btn.clicked.connect(lambda: self._on_update_all_remote(False))
-                    all_btn_row.addWidget(all_btn)
+
+                if show_selected_btn:
+                    sel_btn = QToolButton()
+                    sel_btn.setPopupMode(QToolButton.ToolButtonPopupMode.MenuButtonPopup)
+                    sel_btn.clicked.connect(lambda: self._launch_update_selected(True))
+                    sel_menu = QMenu(sel_btn)
+                    sel_menu.addAction(
+                        "Update Selected (no restart)",
+                        lambda: self._launch_update_selected(False),
+                    )
+                    sel_btn.setMenu(sel_menu)
+                    self._selected_btn = sel_btn
+                    self._refresh_selected_button()
+                    all_btn_row.addWidget(sel_btn)
+
+                if self._on_update_all_remote and len(remote_with_updates) > 1:
+                    if any_needs_restart:
+                        split_btn = QToolButton()
+                        split_btn.setText(f"Update All && Restart ({len(remote_with_updates)})")
+                        split_btn.setPopupMode(QToolButton.ToolButtonPopupMode.MenuButtonPopup)
+                        split_btn.clicked.connect(lambda: self._on_update_all_remote(True))
+                        menu = QMenu(split_btn)
+                        menu.addAction("Update All (no restart)", lambda: self._on_update_all_remote(False))
+                        split_btn.setMenu(menu)
+                        all_btn_row.addWidget(split_btn)
+                    else:
+                        all_btn = QPushButton(f"Update All Remote ({len(remote_with_updates)})")
+                        all_btn.clicked.connect(lambda: self._on_update_all_remote(False))
+                        all_btn_row.addWidget(all_btn)
                 content_layout.addLayout(all_btn_row)
         else:
             needs_restart = any(u.package in RESTART_PACKAGES for u in updates)
@@ -1054,6 +1125,26 @@ class UpdatesDialog(QDialog):
         old.deleteLater()
         self._loading_label.hide()
         self._content_widget.show()
+
+    def _on_host_selection_toggled(self, hostname: str, checked: bool):
+        if checked:
+            self._selected_hostnames.add(hostname)
+        else:
+            self._selected_hostnames.discard(hostname)
+        self._refresh_selected_button()
+
+    def _refresh_selected_button(self):
+        if self._selected_btn is None:
+            return
+        count = sum(1 for cb in self._host_checkboxes.values() if cb.isChecked())
+        self._selected_btn.setText(f"Update && Restart Selected ({count})")
+        self._selected_btn.setEnabled(count > 0)
+
+    def _launch_update_selected(self, restart: bool):
+        # Only hosts that are both ticked and currently shown
+        hosts = [h for h, cb in self._host_checkboxes.items() if cb.isChecked()]
+        if hosts and self._on_update_selected:
+            self._on_update_selected(hosts, restart)
 
     def _filter_updates(self, text: str):
         text = text.lower()
