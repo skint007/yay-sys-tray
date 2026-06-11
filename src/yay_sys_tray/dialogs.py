@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Callable
 
-from PyQt6.QtCore import QEvent, QPointF, QRect, QRectF, QSettings, QSize, Qt, QTime, QUrl
+from PyQt6.QtCore import QEvent, QPointF, QRect, QRectF, QSettings, QSize, Qt, QTime, QTimer, QUrl
 from PyQt6.QtGui import QColor, QDesktopServices, QFont, QPainter, QPainterPath, QPen
 from PyQt6.QtWidgets import QMenu, QToolTip
 from PyQt6.QtWidgets import (
@@ -925,6 +925,65 @@ class _HorizontalTabStyle(QProxyStyle):
         return super().subElementRect(element, option, widget)
 
 
+class _PinnedButtonTabBar(QTabBar):
+    """Tab bar that keeps left-side tab buttons pinned at each tab's left edge.
+
+    Some styles (Breeze, kvantum) misplace side buttons on West tab bars
+    during full relayouts, centering them over the label, while per-tab
+    relayouts (selection changes) position them correctly. Re-pin after every
+    layout or selection change so they can never drift.
+    """
+
+    _PAD = 6
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._pin_scheduled = False
+        self.currentChanged.connect(self._schedule_pin)
+
+    def tabLayoutChange(self):
+        super().tabLayoutChange()
+        self._schedule_pin()
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        self._schedule_pin()
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._schedule_pin()
+
+    def _schedule_pin(self, *_):
+        self._pin_buttons()
+        # Also re-pin on the next event-loop turn in case the style moves
+        # buttons after this hook fires.
+        if not self._pin_scheduled:
+            self._pin_scheduled = True
+            QTimer.singleShot(0, self._deferred_pin)
+
+    def _deferred_pin(self):
+        self._pin_scheduled = False
+        try:
+            self._pin_buttons()
+        except RuntimeError:
+            pass  # C++ object already deleted (dialog closed)
+
+    def _pin_buttons(self):
+        for i in range(self.count()):
+            btn = self.tabButton(i, QTabBar.ButtonPosition.LeftSide)
+            if btn is not None:
+                r = self.tabRect(i)
+                btn.move(r.left() + self._PAD, r.center().y() - btn.height() // 2)
+
+
+class _VerticalTabWidget(QTabWidget):
+    """QTabWidget whose tab bar keeps side buttons pinned (for West tabs)."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setTabBar(_PinnedButtonTabBar(self))
+
+
 class UpdatesDialog(QDialog):
     def __init__(
         self,
@@ -1011,7 +1070,7 @@ class UpdatesDialog(QDialog):
         content_layout.addWidget(self._search_edit)
 
         if use_tabs:
-            tabs = QTabWidget()
+            tabs = _VerticalTabWidget() if self._vertical_tabs else QTabWidget()
             if self._vertical_tabs:
                 tabs.setTabPosition(QTabWidget.TabPosition.West)
                 tab_style = _HorizontalTabStyle()
