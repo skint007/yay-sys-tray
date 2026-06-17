@@ -5,7 +5,13 @@ from dataclasses import dataclass, field
 
 from PyQt6.QtCore import QThread, pyqtSignal
 
-from yay_sys_tray.checker import RESTART_PACKAGES, UpdateInfo, parse_update_output
+from yay_sys_tray.checker import (
+    KERNEL_PACKAGES,
+    UpdateInfo,
+    kernel_package_for,
+    mark_restart_packages,
+    parse_update_output,
+)
 from yay_sys_tray.config import SUBPROCESS_HIDDEN
 
 SSH_OPTS = [
@@ -147,6 +153,25 @@ def _fetch_remote_repositories(
         return {}
 
 
+def _remote_kernel_package(
+    hostname: str, updates: list[UpdateInfo], timeout: int, user: str = ""
+) -> str | None:
+    """Determine a remote host's running kernel package, when it matters.
+
+    Returns None if there are no kernel updates (the flavor is irrelevant) or
+    the running kernel can't be determined (caller treats None conservatively).
+    """
+    if not any(u.package in KERNEL_PACKAGES for u in updates):
+        return None
+    try:
+        result = _ssh_run(hostname, "uname -r", timeout, user=user)
+        if result.returncode == 0 and result.stdout.strip():
+            return kernel_package_for(result.stdout.strip())
+    except Exception:
+        pass
+    return None
+
+
 def check_host(hostname: str, timeout: int, user: str = "") -> HostResult:
     """SSH into a host and run checkupdates to check for updates."""
     try:
@@ -166,7 +191,8 @@ def check_host(hostname: str, timeout: int, user: str = "") -> HostResult:
                     u.repository, arch = info
                     u.url = f"https://archlinux.org/packages/{u.repository}/{arch}/{u.package}/"
 
-            restart_pkgs = [u.package for u in updates if u.package in RESTART_PACKAGES]
+            running_pkg = _remote_kernel_package(hostname, updates, timeout, user=user)
+            restart_pkgs = mark_restart_packages(updates, running_pkg)
             return HostResult(
                 hostname=hostname,
                 updates=updates,

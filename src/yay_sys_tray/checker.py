@@ -6,17 +6,26 @@ from PyQt6.QtCore import QThread, pyqtSignal
 
 from yay_sys_tray.config import SUBPROCESS_HIDDEN
 
-# Packages that require a system restart when updated
-RESTART_PACKAGES = {
+# Kernel packages: only the flavor you're booted into requires a restart when
+# updated (e.g. a mainline `linux` update shouldn't demand a reboot when you're
+# running `linux-lts`).
+KERNEL_PACKAGES = {
     "linux",
     "linux-lts",
     "linux-zen",
     "linux-hardened",
+}
+
+# Packages that always require a system restart when updated.
+ALWAYS_RESTART_PACKAGES = {
     "systemd",
     "glibc",
     "nvidia",
     "nvidia-lts",
 }
+
+# Full set of restart-relevant packages (any flavor), for reference.
+RESTART_PACKAGES = KERNEL_PACKAGES | ALWAYS_RESTART_PACKAGES
 
 
 @dataclass
@@ -27,6 +36,42 @@ class UpdateInfo:
     description: str = ""
     repository: str = ""
     url: str = ""
+    requires_restart: bool = False
+
+
+def kernel_package_for(release: str) -> str:
+    """Map a `uname -r` release string to its kernel package name."""
+    if "-zen" in release:
+        return "linux-zen"
+    if "-hardened" in release:
+        return "linux-hardened"
+    if "-lts" in release:
+        return "linux-lts"
+    return "linux"
+
+
+def package_requires_restart(package: str, running_kernel_pkg: str | None) -> bool:
+    """Whether updating `package` requires a restart.
+
+    For kernel packages, only the running flavor counts. If the running kernel
+    can't be determined (running_kernel_pkg is None), kernel updates are treated
+    conservatively as requiring a restart.
+    """
+    if package in KERNEL_PACKAGES:
+        return running_kernel_pkg is None or package == running_kernel_pkg
+    return package in ALWAYS_RESTART_PACKAGES
+
+
+def mark_restart_packages(
+    updates: list["UpdateInfo"], running_kernel_pkg: str | None
+) -> list[str]:
+    """Set each update's requires_restart flag; return restart-requiring names."""
+    names = []
+    for u in updates:
+        u.requires_restart = package_requires_restart(u.package, running_kernel_pkg)
+        if u.requires_restart:
+            names.append(u.package)
+    return names
 
 
 @dataclass
@@ -110,23 +155,17 @@ def fetch_repositories(packages: list[str]) -> dict[str, tuple[str, str]]:
         return {}
 
 
-def check_reboot_needed() -> RebootInfo:
+def check_reboot_needed(running: str | None = None) -> RebootInfo:
     """Check if a reboot is needed by looking for the running kernel's modules."""
-    running = subprocess.run(
-        ["uname", "-r"], capture_output=True, text=True, **SUBPROCESS_HIDDEN,
-    ).stdout.strip()
+    if running is None:
+        running = subprocess.run(
+            ["uname", "-r"], capture_output=True, text=True, **SUBPROCESS_HIDDEN,
+        ).stdout.strip()
 
     modules_exist = os.path.isdir(f"/lib/modules/{running}")
 
     # Detect which kernel package corresponds to the running kernel
-    if "-zen" in running:
-        pkg = "linux-zen"
-    elif "-hardened" in running:
-        pkg = "linux-hardened"
-    elif "-lts" in running:
-        pkg = "linux-lts"
-    else:
-        pkg = "linux"
+    pkg = kernel_package_for(running)
 
     installed = ""
     try:
@@ -202,12 +241,16 @@ class UpdateChecker(QThread):
                         u.repository, arch = info
                         u.url = f"https://archlinux.org/packages/{u.repository}/{arch}/{u.package}/"
 
-            restart_pkgs = [u.package for u in updates if u.package in RESTART_PACKAGES]
+            running_release = subprocess.run(
+                ["uname", "-r"], capture_output=True, text=True, **SUBPROCESS_HIDDEN,
+            ).stdout.strip()
+            running_pkg = kernel_package_for(running_release)
+            restart_pkgs = mark_restart_packages(updates, running_pkg)
             result = CheckResult(
                 updates=updates,
                 needs_restart=len(restart_pkgs) > 0,
                 restart_packages=restart_pkgs,
-                reboot_info=check_reboot_needed(),
+                reboot_info=check_reboot_needed(running_release),
             )
             self.check_complete.emit(result)
         except FileNotFoundError as e:

@@ -34,7 +34,7 @@ from PyQt6.QtWidgets import (
     QWidgetItem,
 )
 
-from yay_sys_tray.checker import RESTART_PACKAGES, UpdateInfo
+from yay_sys_tray.checker import UpdateInfo
 from yay_sys_tray.config import SUBPROCESS_HIDDEN, AppConfig
 from yay_sys_tray.icons import create_app_icon
 from yay_sys_tray.tailscale import discover_all_tags
@@ -512,7 +512,7 @@ class UpdateItemDelegate(QStyledItemDelegate):
             cursor_x += repo_w + 6
 
         # Restart badge
-        if update.package in RESTART_PACKAGES:
+        if update.requires_restart:
             badge_text = "restart"
             badge_w = badge_fm.horizontalAdvance(badge_text) + 8
             badge_h = badge_fm.height() + 2
@@ -782,7 +782,7 @@ def _make_update_list(
     """Create a styled QListWidget populated with update cards."""
     sorted_updates = sorted(
         updates,
-        key=lambda u: (u.package not in RESTART_PACKAGES, u.package.lower()),
+        key=lambda u: (not u.requires_restart, u.package.lower()),
     )
     lw = _ClickableUpdateList(parent, on_remove=on_remove, ssh_target=ssh_target)
     lw.setItemDelegate(UpdateItemDelegate(lw))
@@ -1079,7 +1079,7 @@ class UpdatesDialog(QDialog):
                 tabs.tabBar().setExpanding(False)
 
             if updates:
-                local_needs_restart = any(u.package in RESTART_PACKAGES for u in updates)
+                local_needs_restart = any(u.requires_restart for u in updates)
                 local_cb = self.on_update if self.on_update else None
                 local_tab = self._build_tab(updates, local_needs_restart, local_cb, on_remove=self._on_remove)
                 local_label = f"Local ({len(updates)})"
@@ -1154,7 +1154,7 @@ class UpdatesDialog(QDialog):
                         all_btn_row.addWidget(all_btn)
                 content_layout.addLayout(all_btn_row)
         else:
-            needs_restart = any(u.package in RESTART_PACKAGES for u in updates)
+            needs_restart = any(u.requires_restart for u in updates)
             self._local_needs_restart = needs_restart
             if needs_restart:
                 content_layout.addWidget(_make_restart_banner())
