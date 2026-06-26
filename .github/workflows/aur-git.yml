@@ -1,13 +1,12 @@
 name: Publish AUR (git)
 
 # Publishes the source package (yay-sys-tray-git), which tracks master HEAD.
-# Fires on push to master (rolling) and on v* tags (clean version).
+# Fires on push to master (rolling); the version tag publishes -bin via build.yml.
 # Required secrets: AUR_SSH_PRIVATE_KEY, AUR_EMAIL
 
 on:
   push:
     branches: [master]
-    tags: ['v*']
 
 jobs:
   aur:

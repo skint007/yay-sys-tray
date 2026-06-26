@@ -59,7 +59,7 @@ jobs:
         run: pnpm install --frozen-lockfile
 
       - name: Build Tauri app
-        run: pnpm tauri build --bundles none
+        run: pnpm tauri build --no-bundle
 
       - name: Assemble release tarball
         run: |
