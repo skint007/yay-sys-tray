@@ -1,6 +1,9 @@
-use crate::checker::{parse_update_output, RESTART_PACKAGES};
+use crate::checker::{
+    kernel_package_for, package_requires_restart, parse_update_output, UpdateInfo, KERNEL_PACKAGES,
+};
 use serde::Serialize;
 use std::collections::HashSet;
+use tauri::{AppHandle, Emitter};
 use tokio::process::Command;
 
 const SSH_OPTS: &[&str] = &[
@@ -21,11 +24,6 @@ pub struct HostResult {
     pub needs_restart: bool,
     pub restart_packages: Vec<String>,
     pub error: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize)]
-pub struct RemoteCheckResult {
-    pub hosts: Vec<HostResult>,
 }
 
 /// Get all unique tag names (without 'tag:' prefix) from Tailscale peers.
@@ -63,7 +61,7 @@ pub async fn discover_all_tags() -> Vec<String> {
 }
 
 /// Get online Tailscale peers whose tags contain ALL specified tags.
-async fn discover_peers(tags: &[String]) -> Vec<String> {
+pub async fn discover_peers(tags: &[String]) -> Vec<String> {
     let output = match Command::new("tailscale")
         .args(["status", "--json"])
         .output()
@@ -114,37 +112,71 @@ async fn discover_peers(tags: &[String]) -> Vec<String> {
     hostnames
 }
 
-/// SSH into a host and run checkupdates.
-async fn check_host(hostname: &str, timeout: u32) -> HostResult {
-    let restart_set: HashSet<&str> = RESTART_PACKAGES.iter().copied().collect();
+/// Build the SSH target (`user@host` or `host`).
+pub fn ssh_target(hostname: &str, ssh_user: &str) -> String {
+    if ssh_user.is_empty() {
+        hostname.to_string()
+    } else {
+        format!("{ssh_user}@{hostname}")
+    }
+}
 
-    let mut args: Vec<String> = vec![
-        "-o".into(),
-        format!("ConnectTimeout={timeout}"),
-    ];
+/// Run a command on a host over SSH (with a hard wall-clock timeout).
+async fn ssh_run(target: &str, command: &str, timeout: u32) -> std::io::Result<std::process::Output> {
+    let mut args: Vec<String> = vec!["-o".into(), format!("ConnectTimeout={timeout}")];
     for opt in SSH_OPTS {
         args.push(opt.to_string());
     }
-    args.push(hostname.to_string());
-    args.push("checkupdates".to_string());
+    args.push(target.to_string());
+    args.push(command.to_string());
 
     let total_timeout = std::time::Duration::from_secs((timeout + 30) as u64);
+    match tokio::time::timeout(total_timeout, Command::new("ssh").args(&args).output()).await {
+        Ok(res) => res,
+        Err(_) => Err(std::io::Error::new(
+            std::io::ErrorKind::TimedOut,
+            "Connection timed out",
+        )),
+    }
+}
 
-    let result = tokio::time::timeout(total_timeout, async {
-        Command::new("ssh").args(&args).output().await
-    })
-    .await;
+/// Determine the remote running kernel package — only queried when there are
+/// kernel updates (the flavor is irrelevant otherwise).
+async fn remote_kernel_package(target: &str, updates: &[UpdateInfo], timeout: u32) -> Option<String> {
+    if !updates.iter().any(|u| KERNEL_PACKAGES.contains(&u.package.as_str())) {
+        return None;
+    }
+    let out = ssh_run(target, "uname -r", timeout).await.ok()?;
+    if out.status.success() {
+        let release = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        Some(kernel_package_for(&release).to_string())
+    } else {
+        None
+    }
+}
 
-    match result {
-        Ok(Ok(output)) => {
+/// SSH into a host and run checkupdates.
+async fn check_host(hostname: &str, timeout: u32, ssh_user: &str) -> HostResult {
+    let target = ssh_target(hostname, ssh_user);
+    let empty = |error: Option<String>| HostResult {
+        hostname: hostname.to_string(),
+        updates: Vec::new(),
+        needs_restart: false,
+        restart_packages: Vec::new(),
+        error,
+    };
+
+    match ssh_run(&target, "checkupdates", timeout).await {
+        Ok(output) => {
             // checkupdates: exit 0 = updates, exit 2 = no updates
             if output.status.success() {
                 let stdout = String::from_utf8_lossy(&output.stdout);
                 if !stdout.trim().is_empty() {
                     let updates = parse_update_output(&stdout);
+                    let running_pkg = remote_kernel_package(&target, &updates, timeout).await;
                     let restart_pkgs: Vec<String> = updates
                         .iter()
-                        .filter(|u| restart_set.contains(u.package.as_str()))
+                        .filter(|u| package_requires_restart(&u.package, running_pkg.as_deref()))
                         .map(|u| u.package.clone())
                         .collect();
                     return HostResult {
@@ -156,43 +188,47 @@ async fn check_host(hostname: &str, timeout: u32) -> HostResult {
                     };
                 }
             }
-            HostResult {
-                hostname: hostname.to_string(),
-                updates: Vec::new(),
-                needs_restart: false,
-                restart_packages: Vec::new(),
-                error: None,
-            }
+            empty(None)
         }
-        Ok(Err(e)) => HostResult {
-            hostname: hostname.to_string(),
-            updates: Vec::new(),
-            needs_restart: false,
-            restart_packages: Vec::new(),
-            error: Some(format!("SSH error: {e}")),
-        },
-        Err(_) => HostResult {
-            hostname: hostname.to_string(),
-            updates: Vec::new(),
-            needs_restart: false,
-            restart_packages: Vec::new(),
-            error: Some("Connection timed out".to_string()),
-        },
+        Err(e) if e.kind() == std::io::ErrorKind::TimedOut => {
+            empty(Some("Connection timed out".to_string()))
+        }
+        Err(e) => empty(Some(format!("SSH error: {e}"))),
     }
 }
 
-/// Check all matching remote hosts concurrently (up to 8 at a time).
-pub async fn check_remote(tags: &[String], timeout: u32) -> Result<RemoteCheckResult, String> {
-    let hostnames = discover_peers(tags).await;
-
+/// Check the given remote hosts concurrently, emitting per-host scan progress
+/// (`check-host-start` / `check-host-done`) so the Updates window can show a
+/// live "checking" view.
+pub async fn check_hosts(
+    app_handle: &AppHandle,
+    hostnames: Vec<String>,
+    timeout: u32,
+    ssh_user: &str,
+) -> Vec<HostResult> {
     if hostnames.is_empty() {
-        return Ok(RemoteCheckResult { hosts: Vec::new() });
+        return Vec::new();
     }
 
     let mut set = tokio::task::JoinSet::new();
     for hostname in hostnames {
+        let _ = app_handle.emit("check-host-start", &hostname);
         let t = timeout;
-        set.spawn(async move { check_host(&hostname, t).await });
+        let user = ssh_user.to_string();
+        let handle = app_handle.clone();
+        set.spawn(async move {
+            let result = check_host(&hostname, t, &user).await;
+            let _ = handle.emit(
+                "check-host-done",
+                serde_json::json!({
+                    "key": result.hostname,
+                    "count": result.updates.len(),
+                    "needs_restart": result.needs_restart,
+                    "error": result.error.is_some(),
+                }),
+            );
+            result
+        });
     }
 
     let mut results = Vec::new();
@@ -206,5 +242,5 @@ pub async fn check_remote(tags: &[String], timeout: u32) -> Result<RemoteCheckRe
     }
 
     results.sort_by(|a, b| a.hostname.cmp(&b.hostname));
-    Ok(RemoteCheckResult { hosts: results })
+    results
 }

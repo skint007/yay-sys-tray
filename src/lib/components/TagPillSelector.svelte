@@ -5,27 +5,17 @@
   let {
     selected = $bindable(""),
     disabled = false,
-  }: {
-    selected: string;
-    disabled: boolean;
-  } = $props();
+  }: { selected: string; disabled?: boolean } = $props();
 
   let allTags = $state<string[]>([]);
   let selectedSet = $state<Set<string>>(new Set());
 
   onMount(async () => {
-    // Parse the comma-separated selected tags
-    const selectedTags = selected
-      .split(",")
-      .map((t) => t.trim())
-      .filter(Boolean);
+    const selectedTags = selected.split(",").map((t) => t.trim()).filter(Boolean);
     selectedSet = new Set(selectedTags);
-
-    // Discover available tags from Tailscale
     try {
       const available = await discoverTailscaleTags();
-      const merged = new Set([...available, ...selectedTags]);
-      allTags = [...merged].sort();
+      allTags = [...new Set([...available, ...selectedTags])].sort();
     } catch {
       allTags = selectedTags.sort();
     }
@@ -34,27 +24,21 @@
   function toggle(tag: string) {
     if (disabled) return;
     const next = new Set(selectedSet);
-    if (next.has(tag)) {
-      next.delete(tag);
-    } else {
-      next.add(tag);
-    }
+    next.has(tag) ? next.delete(tag) : next.add(tag);
     selectedSet = next;
     selected = [...next].sort().join(",");
   }
 </script>
 
-<div class="flex flex-wrap gap-1.5">
+<div class="tags" class:disabled>
   {#if allTags.length === 0}
-    <span class="text-sm italic opacity-50">No tags found</span>
+    <span class="empty">No tags found</span>
   {:else}
-    {#each allTags as tag}
+    {#each allTags as tag (tag)}
       <button
         type="button"
-        class="badge badge-lg cursor-pointer select-none transition-colors"
-        class:badge-primary={selectedSet.has(tag)}
-        class:badge-outline={!selectedSet.has(tag)}
-        class:opacity-40={disabled}
+        class="tag"
+        class:on={selectedSet.has(tag)}
         {disabled}
         onclick={() => toggle(tag)}
       >
@@ -63,3 +47,27 @@
     {/each}
   {/if}
 </div>
+
+<style>
+  .tags { display: flex; flex-wrap: wrap; gap: 6px; }
+  .tags.disabled { opacity: 0.5; pointer-events: none; }
+  .tag {
+    font-family: var(--font-mono);
+    font-weight: 600;
+    font-size: 11px;
+    color: var(--ys-text-muted);
+    background: transparent;
+    border: 1px solid var(--ys-line);
+    border-radius: 13px;
+    padding: 4px 12px;
+    cursor: pointer;
+    transition: color 0.12s ease, background 0.12s ease, border-color 0.12s ease;
+  }
+  .tag:hover { border-color: var(--ys-text-dim); color: var(--ys-text); }
+  .tag.on {
+    background: var(--ys-cyan);
+    color: #0b0a12;
+    border-color: var(--ys-cyan);
+  }
+  .empty { font-family: var(--font-body); font-size: 13px; font-style: italic; color: var(--ys-text-dim); }
+</style>

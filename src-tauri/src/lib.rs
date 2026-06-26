@@ -58,13 +58,18 @@ pub fn run() {
             commands::get_check_result,
             commands::run_local_update,
             commands::run_remote_update,
+            commands::run_local_update_packages,
+            commands::run_remote_update_packages,
             commands::run_remove,
+            commands::run_remote_remove,
+            commands::run_update_selected,
             commands::is_arch_linux,
             commands::get_pactree,
             commands::discover_tailscale_tags,
             commands::manage_autostart,
             commands::manage_passwordless_updates,
             commands::get_version,
+            commands::quit_app,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

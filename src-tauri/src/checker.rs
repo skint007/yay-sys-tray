@@ -1,18 +1,37 @@
 use serde::Serialize;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use tokio::process::Command;
 
-/// Packages that require a system restart when updated.
-pub static RESTART_PACKAGES: &[&str] = &[
-    "linux",
-    "linux-lts",
-    "linux-zen",
-    "linux-hardened",
-    "systemd",
-    "glibc",
-    "nvidia",
-    "nvidia-lts",
-];
+/// Kernel packages: only the flavor you're booted into requires a restart when
+/// updated (a `linux` update shouldn't demand a reboot when running `linux-lts`).
+pub static KERNEL_PACKAGES: &[&str] = &["linux", "linux-lts", "linux-zen", "linux-hardened"];
+
+/// Packages that always require a system restart when updated.
+pub static ALWAYS_RESTART_PACKAGES: &[&str] = &["systemd", "glibc", "nvidia", "nvidia-lts"];
+
+/// Map a `uname -r` release string to its kernel package name.
+pub fn kernel_package_for(release: &str) -> &'static str {
+    if release.contains("-zen") {
+        "linux-zen"
+    } else if release.contains("-hardened") {
+        "linux-hardened"
+    } else if release.contains("-lts") {
+        "linux-lts"
+    } else {
+        "linux"
+    }
+}
+
+/// Whether updating `package` requires a restart. For kernel packages, only the
+/// running flavor counts; `None` treats kernel updates conservatively as needing
+/// a restart (running kernel couldn't be determined).
+pub fn package_requires_restart(package: &str, running_kernel_pkg: Option<&str>) -> bool {
+    if KERNEL_PACKAGES.contains(&package) {
+        running_kernel_pkg.is_none() || running_kernel_pkg == Some(package)
+    } else {
+        ALWAYS_RESTART_PACKAGES.contains(&package)
+    }
+}
 
 #[derive(Debug, Clone, Serialize)]
 pub struct UpdateInfo {
@@ -139,26 +158,11 @@ async fn fetch_repositories(packages: &[String]) -> HashMap<String, (String, Str
 }
 
 /// Check if a reboot is needed by looking for the running kernel's modules.
-async fn check_reboot_needed() -> RebootInfo {
-    let running = Command::new("uname")
-        .arg("-r")
-        .output()
-        .await
-        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
-        .unwrap_or_default();
-
+async fn check_reboot_needed(running: &str) -> RebootInfo {
     let modules_exist = std::path::Path::new(&format!("/lib/modules/{running}")).is_dir();
 
     // Detect which kernel package corresponds to the running kernel
-    let pkg = if running.contains("-zen") {
-        "linux-zen"
-    } else if running.contains("-hardened") {
-        "linux-hardened"
-    } else if running.contains("-lts") {
-        "linux-lts"
-    } else {
-        "linux"
-    };
+    let pkg = kernel_package_for(running);
 
     let installed = Command::new("pacman")
         .args(["-Q", pkg])
@@ -177,14 +181,13 @@ async fn check_reboot_needed() -> RebootInfo {
 
     RebootInfo {
         needed: !modules_exist,
-        running_kernel: running,
+        running_kernel: running.to_string(),
         installed_kernel: installed,
     }
 }
 
 /// Run a full local update check.
 pub async fn check_updates() -> Result<CheckResult, String> {
-    let restart_set: HashSet<&str> = RESTART_PACKAGES.iter().copied().collect();
     let mut updates = Vec::new();
     let mut repo_packages = Vec::new();
 
@@ -247,13 +250,22 @@ pub async fn check_updates() -> Result<CheckResult, String> {
         }
     }
 
+    // Determine the running kernel flavor once (reused for the reboot check).
+    let running_release = Command::new("uname")
+        .arg("-r")
+        .output()
+        .await
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .unwrap_or_default();
+    let running_pkg = kernel_package_for(&running_release);
+
     let restart_pkgs: Vec<String> = updates
         .iter()
-        .filter(|u| restart_set.contains(u.package.as_str()))
+        .filter(|u| package_requires_restart(&u.package, Some(running_pkg)))
         .map(|u| u.package.clone())
         .collect();
 
-    let reboot_info = check_reboot_needed().await;
+    let reboot_info = check_reboot_needed(&running_release).await;
 
     Ok(CheckResult {
         needs_restart: !restart_pkgs.is_empty(),

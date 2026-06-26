@@ -1,7 +1,7 @@
 {
   "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
   "productName": "yay-sys-tray",
-  "version": "0.5.0",
+  "version": "1.0.0",
   "identifier": "com.github.skint007.yay-sys-tray",
   "build": {
     "frontendDist": "../dist",
@@ -14,11 +14,13 @@
       {
         "label": "main",
         "title": "Yay Update Checker",
-        "width": 500,
-        "height": 450,
+        "width": 900,
+        "height": 620,
+        "minWidth": 460,
+        "minHeight": 420,
         "visible": false,
         "resizable": true,
-        "decorations": true
+        "decorations": false
       }
     ],
     "security": {

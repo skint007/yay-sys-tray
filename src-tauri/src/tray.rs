@@ -177,23 +177,81 @@ pub fn setup_tray(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// Start the periodic check timer.
+/// Compute the next occurrence of a weekly scheduled check (day: 0=Mon..6=Sun).
+fn next_scheduled(day: u32, time: &str, now: chrono::DateTime<chrono::Local>) -> chrono::DateTime<chrono::Local> {
+    use chrono::{Datelike, Duration, Local, TimeZone};
+    let mut parts = time.split(':');
+    let h: u32 = parts.next().and_then(|s| s.parse().ok()).unwrap_or(2);
+    let m: u32 = parts.next().and_then(|s| s.parse().ok()).unwrap_or(0);
+
+    let now_wd = now.weekday().num_days_from_monday() as i64;
+    let days_ahead = (day as i64 - now_wd).rem_euclid(7);
+    let date = now.date_naive() + Duration::days(days_ahead);
+    let naive = date.and_hms_opt(h, m, 0).unwrap_or_else(|| now.naive_local());
+    let mut target = Local
+        .from_local_datetime(&naive)
+        .single()
+        .unwrap_or(now);
+    if target <= now {
+        target += Duration::days(7);
+    }
+    target
+}
+
+/// Wall-clock watchdog: fires interval and scheduled checks. Polling on a 60s
+/// tick (rather than a long sleep) means sleep/resume won't drop a due check.
 pub fn start_periodic_check(app_handle: tauri::AppHandle) {
     tauri::async_runtime::spawn(async move {
         // Initial check after 2 seconds
         tokio::time::sleep(std::time::Duration::from_secs(2)).await;
         start_check(app_handle.clone()).await;
 
-        // Then periodically
+        let mut scheduled_target: Option<chrono::DateTime<chrono::Local>> = None;
+
         loop {
-            let interval = {
+            tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+            let now = chrono::Local::now();
+
+            let (interval_enabled, interval_min, sched_enabled, sched_day, sched_time) = {
                 let state = app_handle.state::<AppState>();
                 let config = state.config.read().await;
-                config.check_interval_minutes
+                (
+                    config.check_interval_enabled,
+                    config.check_interval_minutes,
+                    config.scheduled_check_enabled,
+                    config.scheduled_check_day,
+                    config.scheduled_check_time.clone(),
+                )
             };
-            let duration = std::time::Duration::from_secs(interval as u64 * 60);
-            tokio::time::sleep(duration).await;
-            start_check(app_handle.clone()).await;
+
+            let mut fire = false;
+
+            if interval_enabled {
+                let last = *app_handle.state::<TrayState>().last_check.read().await;
+                if let Some(last) = last {
+                    if now - last >= chrono::Duration::minutes(interval_min as i64) {
+                        fire = true;
+                    }
+                }
+            }
+
+            if sched_enabled {
+                if scheduled_target.is_none() {
+                    scheduled_target = Some(next_scheduled(sched_day, &sched_time, now));
+                }
+                if let Some(target) = scheduled_target {
+                    if now >= target {
+                        fire = true;
+                        scheduled_target = Some(next_scheduled(sched_day, &sched_time, now));
+                    }
+                }
+            } else {
+                scheduled_target = None;
+            }
+
+            if fire {
+                start_check(app_handle.clone()).await;
+            }
         }
     });
 }
@@ -201,14 +259,20 @@ pub fn start_periodic_check(app_handle: tauri::AppHandle) {
 /// Run a check and update the tray state.
 pub async fn start_check(app_handle: tauri::AppHandle) {
     log::info!("Starting update check");
-    let _ = app_handle.emit("check-started", ());
 
     // Start spin animation
     let tray_state = app_handle.state::<TrayState>();
     tray_state.cancel_bounce();
     tray_state.reset_spin();
 
-    let (animations_enabled, notify_mode, tailscale_enabled, tailscale_tags, tailscale_timeout) = {
+    let (
+        animations_enabled,
+        notify_mode,
+        tailscale_enabled,
+        tailscale_tags,
+        tailscale_timeout,
+        tailscale_ssh_user,
+    ) = {
         let state = app_handle.state::<AppState>();
         let config = state.config.read().await;
         (
@@ -217,41 +281,66 @@ pub async fn start_check(app_handle: tauri::AppHandle) {
             config.tailscale_enabled,
             config.tailscale_tags.clone(),
             config.tailscale_timeout,
+            config.tailscale_ssh_user.clone(),
         )
     };
 
     start_spin_animation(app_handle.clone(), animations_enabled);
 
-    // Run local check
-    log::info!("Running local update check");
-    let result = checker::check_updates().await;
-    log::info!("Local check result: {} updates, err={}",
-        result.as_ref().map(|r| r.updates.len()).unwrap_or(0),
-        result.as_ref().err().map(|e| e.as_str()).unwrap_or("none"));
-
-    // Run remote check if Tailscale is enabled
-    let remote_hosts = if tailscale_enabled && !tailscale_tags.is_empty() {
-        let prefixed_tags: Vec<String> = tailscale_tags
+    // Discover the remote hosts up front so the Updates window can render the
+    // full scan list (local first, then each tagged peer) and track progress.
+    let remote_hostnames = if tailscale_enabled && !tailscale_tags.is_empty() {
+        let tags: Vec<String> = tailscale_tags
             .split(',')
             .map(|t| t.trim().to_string())
             .filter(|t| !t.is_empty())
             .collect();
-        log::info!("Running Tailscale check with tags: {:?}", prefixed_tags);
-        match tailscale::check_remote(&prefixed_tags, tailscale_timeout).await {
-            Ok(remote) => {
-                log::info!("Tailscale check found {} hosts", remote.hosts.len());
-                for h in &remote.hosts {
-                    log::info!("  {}: {} updates, error={:?}", h.hostname, h.updates.len(), h.error);
-                }
-                remote.hosts
-            }
-            Err(e) => {
-                log::error!("Tailscale check failed: {e}");
-                Vec::new()
-            }
-        }
+        log::info!("Discovering Tailscale peers with tags: {:?}", tags);
+        tailscale::discover_peers(&tags).await
     } else {
         log::info!("Tailscale disabled or no tags configured");
+        Vec::new()
+    };
+
+    // Announce the full host set so the UI can show queued/checking/done states.
+    let mut host_list = vec![serde_json::json!({ "key": "local", "name": "Local" })];
+    for hostname in &remote_hostnames {
+        host_list.push(serde_json::json!({ "key": hostname, "name": hostname }));
+    }
+    let _ = app_handle.emit("check-started", serde_json::json!({ "hosts": host_list }));
+
+    // Run local check
+    log::info!("Running local update check");
+    let _ = app_handle.emit("check-host-start", "local");
+    let result = checker::check_updates().await;
+    log::info!("Local check result: {} updates, err={}",
+        result.as_ref().map(|r| r.updates.len()).unwrap_or(0),
+        result.as_ref().err().map(|e| e.as_str()).unwrap_or("none"));
+    let _ = app_handle.emit(
+        "check-host-done",
+        serde_json::json!({
+            "key": "local",
+            "count": result.as_ref().map(|r| r.updates.len()).unwrap_or(0),
+            "needs_restart": result.as_ref().map(|r| r.needs_restart).unwrap_or(false),
+            "error": result.is_err(),
+        }),
+    );
+
+    // Run remote checks (each emits its own progress as it completes).
+    let remote_hosts = if !remote_hostnames.is_empty() {
+        let hosts = tailscale::check_hosts(
+            &app_handle,
+            remote_hostnames,
+            tailscale_timeout,
+            &tailscale_ssh_user,
+        )
+        .await;
+        log::info!("Tailscale check finished for {} hosts", hosts.len());
+        for h in &hosts {
+            log::info!("  {}: {} updates, error={:?}", h.hostname, h.updates.len(), h.error);
+        }
+        hosts
+    } else {
         Vec::new()
     };
 

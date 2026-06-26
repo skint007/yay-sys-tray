@@ -28,11 +28,41 @@ export async function runRemoteUpdate(
   return invoke("run_remote_update", { hostname, restart });
 }
 
+export async function runLocalUpdatePackages(
+  packages: string[],
+  restart: boolean,
+): Promise<void> {
+  return invoke("run_local_update_packages", { packages, restart });
+}
+
+export async function runRemoteUpdatePackages(
+  hostname: string,
+  packages: string[],
+  restart: boolean,
+): Promise<void> {
+  return invoke("run_remote_update_packages", { hostname, packages, restart });
+}
+
+export async function runUpdateSelected(
+  hostnames: string[],
+  restart: boolean,
+): Promise<void> {
+  return invoke("run_update_selected", { hostnames, restart });
+}
+
 export async function runRemove(
   packageName: string,
   flags: string,
 ): Promise<void> {
   return invoke("run_remove", { package: packageName, flags });
+}
+
+export async function runRemoteRemove(
+  hostname: string,
+  packageName: string,
+  flags: string,
+): Promise<void> {
+  return invoke("run_remote_remove", { hostname, package: packageName, flags });
 }
 
 export async function isArchLinux(): Promise<boolean> {
@@ -42,8 +72,9 @@ export async function isArchLinux(): Promise<boolean> {
 export async function getPactree(
   packageName: string,
   reverse: boolean,
+  hostname?: string,
 ): Promise<string> {
-  return invoke("get_pactree", { package: packageName, reverse });
+  return invoke("get_pactree", { package: packageName, reverse, hostname: hostname ?? null });
 }
 
 export async function discoverTailscaleTags(): Promise<string[]> {
@@ -62,4 +93,8 @@ export async function managePasswordlessUpdates(
 
 export async function getVersion(): Promise<string> {
   return invoke("get_version");
+}
+
+export async function quitApp(): Promise<void> {
+  return invoke("quit_app");
 }
