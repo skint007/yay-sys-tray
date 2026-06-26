@@ -1,0 +1,179 @@
+@import "tailwindcss";
+@plugin "daisyui" {
+  themes: skint007-dark --default --prefersdark, skint007-light;
+}
+
+/* ── SKINT007 brand themes (DaisyUI base/semantic mapping) ───────────── */
+@plugin "daisyui/theme" {
+  name: "skint007-dark";
+  default: true;
+  prefersdark: true;
+  color-scheme: dark;
+  --color-base-100: #14111f;
+  --color-base-200: #120f1c;
+  --color-base-300: #0a0810;
+  --color-base-content: #f4f2fb;
+  --color-primary: #7c3aed;
+  --color-primary-content: #ffffff;
+  --color-secondary: #a78bfa;
+  --color-secondary-content: #14111f;
+  --color-accent: #22d3ee;
+  --color-accent-content: #09080f;
+  --color-neutral: #1b1726;
+  --color-neutral-content: #a39fb8;
+  --color-info: #38bdf8;
+  --color-info-content: #09080f;
+  --color-success: #34d399;
+  --color-success-content: #09080f;
+  --color-warning: #fbbf24;
+  --color-warning-content: #09080f;
+  --color-error: #f87171;
+  --color-error-content: #09080f;
+  --radius-selector: 0.6rem;
+  --radius-field: 0.6rem;
+  --radius-box: 0.75rem;
+  --border: 1px;
+}
+
+@plugin "daisyui/theme" {
+  name: "skint007-light";
+  color-scheme: light;
+  --color-base-100: #ffffff;
+  --color-base-200: #f7f6fb;
+  --color-base-300: #ece9f3;
+  --color-base-content: #1a1622;
+  --color-primary: #7c3aed;
+  --color-primary-content: #ffffff;
+  --color-secondary: #7c3aed;
+  --color-secondary-content: #ffffff;
+  --color-accent: #06b6ce;
+  --color-accent-content: #ffffff;
+  --color-neutral: #e4e1ec;
+  --color-neutral-content: #57536a;
+  --color-info: #2563eb;
+  --color-info-content: #ffffff;
+  --color-success: #059669;
+  --color-success-content: #ffffff;
+  --color-warning: #d97706;
+  --color-warning-content: #ffffff;
+  --color-error: #dc2626;
+  --color-error-content: #ffffff;
+  --radius-selector: 0.6rem;
+  --radius-field: 0.6rem;
+  --radius-box: 0.75rem;
+  --border: 1px;
+}
+
+/* ── SKINT007 bespoke tokens (beyond DaisyUI's semantic set) ─────────── */
+[data-theme="skint007-dark"] {
+  --ys-ground: #09080f;
+  --ys-titlebar: #0d0b14;
+  --ys-surface: #14111f;
+  --ys-surface-row: #120f1c;
+  --ys-surface-input: #0a0810;
+  --ys-line: #262338;
+  --ys-line-soft: #201c2e;
+  --ys-line-softer: #1b1726;
+  --ys-text: #f4f2fb;
+  --ys-text-muted: #a39fb8;
+  --ys-text-dim: #6e6a82;
+  --ys-text-dimmest: #4a4658;
+  --ys-checkbox-border: #34303f;
+  --ys-violet-700: #6d28d9;
+  --ys-violet-600: #7c3aed;
+  --ys-violet-500: #8b5cf6;
+  --ys-violet-400: #a78bfa;
+  --ys-violet-text: #a78bfa;
+  --ys-cyan: #22d3ee;
+  --ys-cyan-text: #22d3ee;
+  --ys-sky: #38bdf8;
+  --ys-good: #34d399;
+  --ys-pending: #fbbf24;
+  --ys-danger: #f87171;
+  --ys-diff-base: #8c879d;
+  --ys-diff-old: #f87171;
+  --ys-diff-new: #34d399;
+  --ys-diff-arrow: #4a4658;
+  --ys-repo-core: #38bdf8;
+  --ys-repo-extra: #34d399;
+  --ys-repo-multilib: #fbbf24;
+  --ys-repo-aur: #a78bfa;
+  --ys-glow: 0 8px 30px -6px rgba(124, 58, 237, 0.55);
+  --ys-bloom: rgba(124, 58, 237, 0.4);
+}
+
+[data-theme="skint007-light"] {
+  --ys-ground: #f7f6fb;
+  --ys-titlebar: #f1eef8;
+  --ys-surface: #ffffff;
+  --ys-surface-row: #ffffff;
+  --ys-surface-input: #ffffff;
+  --ys-line: #e4e1ec;
+  --ys-line-soft: #ece9f3;
+  --ys-line-softer: #f0edf6;
+  --ys-text: #1a1622;
+  --ys-text-muted: #57536a;
+  --ys-text-dim: #908ca0;
+  --ys-text-dimmest: #c9c5d8;
+  --ys-checkbox-border: #c9c5d8;
+  --ys-violet-700: #6d28d9;
+  --ys-violet-600: #7c3aed;
+  --ys-violet-500: #8b5cf6;
+  --ys-violet-400: #a78bfa;
+  --ys-violet-text: #7c3aed;
+  --ys-cyan: #06b6ce;
+  --ys-cyan-text: #0891a8;
+  --ys-sky: #2563eb;
+  --ys-good: #059669;
+  --ys-pending: #d97706;
+  --ys-danger: #dc2626;
+  --ys-diff-base: #908ca0;
+  --ys-diff-old: #dc2626;
+  --ys-diff-new: #059669;
+  --ys-diff-arrow: #b8b4c6;
+  --ys-repo-core: #2563eb;
+  --ys-repo-extra: #059669;
+  --ys-repo-multilib: #d97706;
+  --ys-repo-aur: #7c3aed;
+  --ys-glow: 0 8px 26px -6px rgba(124, 58, 237, 0.4);
+  --ys-bloom: rgba(124, 58, 237, 0.16);
+}
+
+/* ── Bundled brand fonts ─────────────────────────────────────────────── */
+@font-face { font-family: "Space Grotesk"; src: url("./assets/fonts/SpaceGrotesk-SemiBold.ttf") format("truetype"); font-weight: 600; font-display: swap; }
+@font-face { font-family: "Space Grotesk"; src: url("./assets/fonts/SpaceGrotesk-Bold.ttf") format("truetype"); font-weight: 700; font-display: swap; }
+@font-face { font-family: "Manrope"; src: url("./assets/fonts/Manrope-Regular.ttf") format("truetype"); font-weight: 400; font-display: swap; }
+@font-face { font-family: "Manrope"; src: url("./assets/fonts/Manrope-Medium.ttf") format("truetype"); font-weight: 500; font-display: swap; }
+@font-face { font-family: "Manrope"; src: url("./assets/fonts/Manrope-SemiBold.ttf") format("truetype"); font-weight: 600; font-display: swap; }
+@font-face { font-family: "JetBrains Mono"; src: url("./assets/fonts/JetBrainsMono-Medium.ttf") format("truetype"); font-weight: 500; font-display: swap; }
+@font-face { font-family: "JetBrains Mono"; src: url("./assets/fonts/JetBrainsMono-SemiBold.ttf") format("truetype"); font-weight: 600; font-display: swap; }
+
+:root {
+  --font-display: "Space Grotesk", "Inter", system-ui, sans-serif;
+  --font-body: "Manrope", "Inter", system-ui, sans-serif;
+  --font-mono: "JetBrains Mono", "FiraCode Nerd Font Mono", monospace;
+}
+
+/* ── Font utility classes ────────────────────────────────────────────── */
+@layer utilities {
+  .font-display { font-family: var(--font-display); }
+  .font-body { font-family: var(--font-body); }
+  .font-monoys { font-family: var(--font-mono); }
+}
+
+html, body, #app { height: 100%; }
+html, body { margin: 0; }
+body {
+  font-family: var(--font-body);
+  background: var(--ys-ground);
+  color: var(--ys-text);
+  overflow: hidden;
+  /* Desktop chrome: text isn't selectable (so dragging the titlebar doesn't
+     select text); re-enabled below for actual inputs/selectable content. */
+  user-select: none;
+  -webkit-user-select: none;
+}
+input, textarea, select, [data-selectable] {
+  user-select: text;
+  -webkit-user-select: text;
+}

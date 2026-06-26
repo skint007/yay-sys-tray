@@ -1,0 +1,5 @@
+# pnpm 11 reads build-script approval here. esbuild (used by vite) ships a
+# postinstall; allow it so `pnpm install` / the `pnpm tauri` wrapper don't fail
+# on the sandboxed-build-scripts check.
+allowBuilds:
+  esbuild: true
