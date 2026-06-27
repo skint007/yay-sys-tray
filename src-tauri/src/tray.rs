@@ -125,28 +125,17 @@ pub fn setup_tray(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
         *item = Some(show_updates);
     }
 
-    // Listen for update-finished events to trigger a re-check
+    // Re-check only the target whose update terminal just closed (a single
+    // host, or "local") instead of rescanning the whole fleet every time.
     let handle = app.handle().clone();
-    app.listen("update-finished", move |_| {
+    app.listen("update-finished", move |event| {
+        let scope = serde_json::from_str::<serde_json::Value>(event.payload())
+            .ok()
+            .and_then(|v| v.get("scope").and_then(|s| s.as_str()).map(String::from))
+            .unwrap_or_else(|| "local".to_string());
         let h = handle.clone();
         tauri::async_runtime::spawn(async move {
-            // Check if self-update was pending
-            // (yay-sys-tray-git was in the updates list)
-            let tray_state = h.state::<TrayState>();
-            let self_update = {
-                let result = tray_state.local_result.read().await;
-                result
-                    .as_ref()
-                    .map(|r| r.updates.iter().any(|u| u.package == "yay-sys-tray-git"))
-                    .unwrap_or(false)
-            };
-            if self_update {
-                log::info!("Self-update detected, restarting service");
-                let _ = crate::system::restart_service().await;
-                return;
-            }
-            // Otherwise re-check
-            start_check(h).await;
+            handle_update_finished(h, scope).await;
         });
     });
 
@@ -347,16 +336,7 @@ pub async fn start_check(app_handle: tauri::AppHandle) {
             update_tray_state(&app_handle, &check_result, &remote_hosts, animations_enabled)
                 .await;
 
-            // Enable/disable "Show Updates" and surface the count in its label,
-            // since the tray tooltip is a no-op on Linux (libappindicator).
-            if let Some(item) = tray_state.show_updates_item.read().await.as_ref() {
-                let _ = item.set_enabled(total_count > 0);
-                let _ = item.set_text(if total_count > 0 {
-                    format!("Show Updates ({total_count})")
-                } else {
-                    "Show Updates".to_string()
-                });
-            }
+            set_show_updates_label(&app_handle, total_count).await;
 
             // Send notification if configured
             let should_notify = match notify_mode.as_str() {
@@ -373,6 +353,130 @@ pub async fn start_check(app_handle: tauri::AppHandle) {
             let _ = app_handle.emit("check-error", &err);
             update_tray_error(&app_handle);
         }
+    }
+}
+
+/// Re-check after a terminal-launched update closes. Only the affected target
+/// is re-scanned: a pending self-update restarts the service, "local" re-checks
+/// the local system, and a hostname re-checks just that one remote host.
+async fn handle_update_finished(app_handle: tauri::AppHandle, scope: String) {
+    if scope == "local" {
+        // A self-update (yay-sys-tray-git was in the local list) needs a service
+        // restart to load the new binary rather than a plain re-check.
+        let self_update = {
+            let tray_state = app_handle.state::<TrayState>();
+            let result = tray_state.local_result.read().await;
+            result
+                .as_ref()
+                .map(|r| r.updates.iter().any(|u| u.package == "yay-sys-tray-git"))
+                .unwrap_or(false)
+        };
+        if self_update {
+            log::info!("Self-update detected, restarting service");
+            let _ = crate::system::restart_service().await;
+            return;
+        }
+        recheck_local(app_handle).await;
+    } else {
+        recheck_remote(app_handle, scope).await;
+    }
+}
+
+/// Re-run the local check and refresh the tray, leaving remote results intact.
+async fn recheck_local(app_handle: tauri::AppHandle) {
+    log::info!("Re-checking local system after update");
+    let result = checker::check_updates().await;
+    let tray_state = app_handle.state::<TrayState>();
+    match result {
+        Ok(check_result) => {
+            *tray_state.local_result.write().await = Some(check_result.clone());
+            *tray_state.last_check.write().await = Some(chrono::Local::now());
+            let remote = tray_state.remote_results.read().await.clone();
+            refresh_after_recheck(&app_handle, &check_result, &remote).await;
+            let _ = app_handle.emit("check-complete", &check_result);
+        }
+        Err(err) => {
+            log::error!("Local re-check failed: {err}");
+            let _ = app_handle.emit("check-error", &err);
+            update_tray_error(&app_handle);
+        }
+    }
+}
+
+/// Re-check a single remote host and refresh, leaving local + other hosts intact.
+async fn recheck_remote(app_handle: tauri::AppHandle, hostname: String) {
+    log::info!("Re-checking remote host {hostname} after update");
+    let (timeout, ssh_user) = {
+        let state = app_handle.state::<AppState>();
+        let config = state.config.read().await;
+        (config.tailscale_timeout, config.tailscale_ssh_user.clone())
+    };
+
+    let results =
+        tailscale::check_hosts(&app_handle, vec![hostname.clone()], timeout, &ssh_user).await;
+
+    let tray_state = app_handle.state::<TrayState>();
+    {
+        let mut remote = tray_state.remote_results.write().await;
+        if let Some(updated) = results.into_iter().next() {
+            match remote.iter_mut().find(|h| h.hostname == hostname) {
+                Some(slot) => *slot = updated,
+                None => {
+                    remote.push(updated);
+                    remote.sort_by(|a, b| a.hostname.cmp(&b.hostname));
+                }
+            }
+        }
+    }
+    *tray_state.last_check.write().await = Some(chrono::Local::now());
+
+    let local = tray_state.local_result.read().await.clone();
+    let remote = tray_state.remote_results.read().await.clone();
+    if let Some(local) = local {
+        refresh_after_recheck(&app_handle, &local, &remote).await;
+    }
+    let _ = app_handle.emit("check-complete", serde_json::json!({}));
+}
+
+/// Recompute the tray icon/tooltip + menu from the given local & remote state.
+/// Shared by the targeted re-checks; intentionally does not notify (it's a
+/// post-update refresh, not a scheduled scan).
+async fn refresh_after_recheck(
+    app_handle: &tauri::AppHandle,
+    local: &CheckResult,
+    remote: &[HostResult],
+) {
+    let animations = {
+        let state = app_handle.state::<AppState>();
+        let config = state.config.read().await;
+        config.animations
+    };
+    let total_count = local.updates.len() as u32
+        + remote.iter().map(|h| h.updates.len() as u32).sum::<u32>();
+
+    {
+        let tray_state = app_handle.state::<TrayState>();
+        *tray_state.previous_count.write().await = total_count;
+    }
+    update_tray_state(app_handle, local, remote, animations).await;
+    set_show_updates_label(app_handle, total_count).await;
+}
+
+/// Enable/disable the "Show Updates" menu item and surface the count in its
+/// label (the tray tooltip is a no-op on Linux/libappindicator).
+async fn set_show_updates_label(app_handle: &tauri::AppHandle, total_count: u32) {
+    let item = {
+        let tray_state = app_handle.state::<TrayState>();
+        let guard = tray_state.show_updates_item.read().await;
+        guard.clone()
+    };
+    if let Some(item) = item {
+        let _ = item.set_enabled(total_count > 0);
+        let _ = item.set_text(if total_count > 0 {
+            format!("Show Updates ({total_count})")
+        } else {
+            "Show Updates".to_string()
+        });
     }
 }
 

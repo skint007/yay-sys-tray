@@ -107,7 +107,7 @@ pub async fn run_local_update(app_handle: tauri::AppHandle, restart: bool) {
         cmd
     };
 
-    spawn_with(app_handle, prefix, yay_cmd).await;
+    spawn_with(app_handle, prefix, yay_cmd, "local".to_string()).await;
 }
 
 /// Update only the selected local packages (`yay -S <pkgs>`).
@@ -139,7 +139,7 @@ pub async fn run_local_update_packages(
         cmd
     };
 
-    spawn_with(app_handle, prefix, yay_cmd).await;
+    spawn_with(app_handle, prefix, yay_cmd, "local".to_string()).await;
 }
 
 /// Launch a remote full system update via SSH in a terminal.
@@ -156,7 +156,7 @@ pub async fn run_remote_update(app_handle: tauri::AppHandle, hostname: &str, res
         cmd.push_str(&format!(" && {}", delayed_reboot_cmd("sudo reboot", cfg.delay)));
     }
 
-    spawn_with(app_handle, prefix, vec!["ssh".to_string(), target, cmd]).await;
+    spawn_with(app_handle, prefix, vec!["ssh".to_string(), target, cmd], hostname.to_string()).await;
 }
 
 /// Update only the selected packages on a remote host.
@@ -182,7 +182,7 @@ pub async fn run_remote_update_packages(
         cmd.push_str(&format!(" && {}", delayed_reboot_cmd("sudo reboot", cfg.delay)));
     }
 
-    spawn_with(app_handle, prefix, vec!["ssh".to_string(), target, cmd]).await;
+    spawn_with(app_handle, prefix, vec!["ssh".to_string(), target, cmd], hostname.to_string()).await;
 }
 
 /// Remove a local package in a terminal.
@@ -195,7 +195,7 @@ pub async fn run_remove(app_handle: tauri::AppHandle, package: &str, flags: &str
         yay_cmd.push("--noconfirm".to_string());
     }
 
-    spawn_with(app_handle, prefix, yay_cmd).await;
+    spawn_with(app_handle, prefix, yay_cmd, "local".to_string()).await;
 }
 
 /// Remove a package on a remote host via SSH.
@@ -215,17 +215,24 @@ pub async fn run_remote_remove(
         cmd.push_str(" --noconfirm");
     }
 
-    spawn_with(app_handle, prefix, vec!["ssh".to_string(), target, cmd]).await;
+    spawn_with(app_handle, prefix, vec!["ssh".to_string(), target, cmd], hostname.to_string()).await;
 }
 
-async fn spawn_with(app_handle: tauri::AppHandle, prefix: Vec<String>, cmd: Vec<String>) {
+async fn spawn_with(
+    app_handle: tauri::AppHandle,
+    prefix: Vec<String>,
+    cmd: Vec<String>,
+    scope: String,
+) {
     let mut full = prefix;
     full.extend(cmd);
-    spawn_and_wait(app_handle, full).await;
+    spawn_and_wait(app_handle, full, scope).await;
 }
 
-/// Spawn a terminal command, wait for it to finish, then emit update-finished.
-async fn spawn_and_wait(app_handle: tauri::AppHandle, cmd: Vec<String>) {
+/// Spawn a terminal command, wait for it to finish, then emit update-finished
+/// carrying the scope ("local" or a hostname) so only that target gets
+/// re-checked rather than the whole fleet.
+async fn spawn_and_wait(app_handle: tauri::AppHandle, cmd: Vec<String>, scope: String) {
     if cmd.is_empty() {
         return;
     }
@@ -236,7 +243,7 @@ async fn spawn_and_wait(app_handle: tauri::AppHandle, cmd: Vec<String>) {
         Ok(mut child) => {
             tauri::async_runtime::spawn(async move {
                 let _ = child.wait().await;
-                let _ = app_handle.emit("update-finished", ());
+                let _ = app_handle.emit("update-finished", serde_json::json!({ "scope": scope }));
             });
         }
         Err(e) => log::error!("Failed to spawn terminal: {e}"),
