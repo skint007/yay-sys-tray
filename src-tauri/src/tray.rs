@@ -98,48 +98,24 @@ pub fn setup_tray(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
                     start_check(handle).await;
                 });
             }
-            "show_updates" => {
-                let _ = app_handle.emit("open-window", serde_json::json!({"view": "updates"}));
-                if let Some(window) = app_handle.get_webview_window("main") {
-                    let _ = window.show();
-                    let _ = window.set_focus();
-                }
-            }
+            "show_updates" => open_window(app_handle, "updates"),
             "update_system" => {
                 let handle = app_handle.clone();
                 tauri::async_runtime::spawn(async move {
                     crate::terminal::run_local_update(handle, false).await;
                 });
             }
-            "settings" => {
-                let _ = app_handle.emit("open-window", serde_json::json!({"view": "settings"}));
-                if let Some(window) = app_handle.get_webview_window("main") {
-                    let _ = window.show();
-                    let _ = window.set_focus();
-                }
-            }
-            "about" => {
-                let _ = app_handle.emit("open-window", serde_json::json!({"view": "about"}));
-                if let Some(window) = app_handle.get_webview_window("main") {
-                    let _ = window.show();
-                    let _ = window.set_focus();
-                }
-            }
+            "settings" => open_window(app_handle, "settings"),
+            "about" => open_window(app_handle, "about"),
             "quit" => {
                 app_handle.exit(0);
             }
             _ => {}
         })
-        .on_tray_icon_event(|tray_icon, event| {
-            if let tauri::tray::TrayIconEvent::Click { .. } = event {
-                let app_handle = tray_icon.app_handle();
-                let _ = app_handle.emit("open-window", serde_json::json!({"view": "updates"}));
-                if let Some(window) = app_handle.get_webview_window("main") {
-                    let _ = window.show();
-                    let _ = window.set_focus();
-                }
-            }
-        })
+        // Note: on Linux the tray uses libappindicator, which delivers no
+        // click events and always shows the menu on any click, so the menu is
+        // the only interaction. We keep it informative instead (see the
+        // dynamic "Show Updates (N)" label in update_tray_state).
         .build(app)?;
 
     // Store the show_updates menu item for later enable/disable
@@ -175,6 +151,15 @@ pub fn setup_tray(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     });
 
     Ok(())
+}
+
+/// Show the main window on a given view (updates/settings/about) and focus it.
+fn open_window(app_handle: &tauri::AppHandle, view: &str) {
+    let _ = app_handle.emit("open-window", serde_json::json!({ "view": view }));
+    if let Some(window) = app_handle.get_webview_window("main") {
+        let _ = window.show();
+        let _ = window.set_focus();
+    }
 }
 
 /// Compute the next occurrence of a weekly scheduled check (day: 0=Mon..6=Sun).
@@ -362,9 +347,15 @@ pub async fn start_check(app_handle: tauri::AppHandle) {
             update_tray_state(&app_handle, &check_result, &remote_hosts, animations_enabled)
                 .await;
 
-            // Enable/disable "Show Updates" menu item
+            // Enable/disable "Show Updates" and surface the count in its label,
+            // since the tray tooltip is a no-op on Linux (libappindicator).
             if let Some(item) = tray_state.show_updates_item.read().await.as_ref() {
                 let _ = item.set_enabled(total_count > 0);
+                let _ = item.set_text(if total_count > 0 {
+                    format!("Show Updates ({total_count})")
+                } else {
+                    "Show Updates".to_string()
+                });
             }
 
             // Send notification if configured
