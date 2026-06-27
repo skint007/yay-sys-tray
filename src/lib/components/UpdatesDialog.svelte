@@ -164,6 +164,32 @@
     }
   });
 
+  // Prune stale selections when the host set changes — e.g. a re-check drops a
+  // host that went offline or has no updates left after updating. Otherwise a
+  // removed host keeps inflating the "Update All Remote (N)" count (and would
+  // still be acted on by runRemoteBulk).
+  $effect(() => {
+    const validKeys = new Set(hosts.map((h) => h.key));
+
+    const prunedChecked = checkedHosts.filter((k) => validKeys.has(k));
+    if (prunedChecked.length !== checkedHosts.length) {
+      checkedHosts = prunedChecked;
+    }
+
+    for (const key of Object.keys(selectedByHost)) {
+      const host = hosts.find((h) => h.key === key);
+      if (!host) {
+        delete selectedByHost[key];
+        continue;
+      }
+      // Also drop any selected packages the host no longer offers.
+      const offered = new Set(host.updates.map((u) => u.package));
+      const cur = selectedByHost[key];
+      const pruned = cur.filter((p) => offered.has(p));
+      if (pruned.length !== cur.length) selectedByHost[key] = pruned;
+    }
+  });
+
   onMount(async () => {
     // Preview harness: seed the checking view directly, no Tauri runtime.
     if (previewChecking) {
