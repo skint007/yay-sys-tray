@@ -1,8 +1,9 @@
 use crate::checker::{
-    kernel_package_for, package_requires_restart, parse_update_output, UpdateInfo, KERNEL_PACKAGES,
+    kernel_package_for, package_requires_restart, package_url, parse_si_repositories,
+    parse_update_output, UpdateInfo, KERNEL_PACKAGES,
 };
 use serde::Serialize;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use tauri::{AppHandle, Emitter};
 use tokio::process::Command;
 
@@ -155,6 +156,25 @@ async fn remote_kernel_package(target: &str, updates: &[UpdateInfo], timeout: u3
     }
 }
 
+/// Fetch each remote package's source repository via `pacman -Si` over SSH, so
+/// remote update cards show the repo badge (core/extra/...) like local ones do.
+async fn remote_repositories(
+    target: &str,
+    packages: &[String],
+    timeout: u32,
+) -> HashMap<String, (String, String)> {
+    if packages.is_empty() {
+        return HashMap::new();
+    }
+    let command = format!("pacman -Si {}", packages.join(" "));
+    match ssh_run(target, &command, timeout).await {
+        Ok(out) if out.status.success() => {
+            parse_si_repositories(&String::from_utf8_lossy(&out.stdout))
+        }
+        _ => HashMap::new(),
+    }
+}
+
 /// SSH into a host and run checkupdates.
 async fn check_host(hostname: &str, timeout: u32, ssh_user: &str) -> HostResult {
     let target = ssh_target(hostname, ssh_user);
@@ -172,8 +192,20 @@ async fn check_host(hostname: &str, timeout: u32, ssh_user: &str) -> HostResult 
             if output.status.success() {
                 let stdout = String::from_utf8_lossy(&output.stdout);
                 if !stdout.trim().is_empty() {
-                    let updates = parse_update_output(&stdout);
+                    let mut updates = parse_update_output(&stdout);
                     let running_pkg = remote_kernel_package(&target, &updates, timeout).await;
+
+                    // Enrich with source repo + package URL (checkupdates omits these).
+                    let pkg_names: Vec<String> =
+                        updates.iter().map(|u| u.package.clone()).collect();
+                    let repos = remote_repositories(&target, &pkg_names, timeout).await;
+                    for u in &mut updates {
+                        if let Some((repo, arch)) = repos.get(&u.package) {
+                            u.repository = repo.clone();
+                            u.url = package_url(repo, arch, &u.package);
+                        }
+                    }
+
                     let restart_pkgs: Vec<String> = updates
                         .iter()
                         .filter(|u| package_requires_restart(&u.package, running_pkg.as_deref()))

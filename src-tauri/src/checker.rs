@@ -117,20 +117,9 @@ async fn fetch_descriptions(packages: &[String]) -> HashMap<String, String> {
     descriptions
 }
 
-/// Fetch repository name and URL from the pacman sync database.
-async fn fetch_repositories(packages: &[String]) -> HashMap<String, (String, String)> {
-    if packages.is_empty() {
-        return HashMap::new();
-    }
-    let mut args = vec!["-Si"];
-    args.extend(packages.iter().map(|s| s.as_str()));
-
-    let output = match Command::new("pacman").args(&args).output().await {
-        Ok(o) => o,
-        Err(_) => return HashMap::new(),
-    };
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
+/// Parse `pacman -Si` output into a map of package -> (repository, architecture).
+/// Shared by the local check and the remote (SSH) check so both surface the repo.
+pub fn parse_si_repositories(stdout: &str) -> HashMap<String, (String, String)> {
     let mut repos = HashMap::new();
     let mut current_repo = String::new();
     let mut current_name = String::new();
@@ -155,6 +144,28 @@ async fn fetch_repositories(packages: &[String]) -> HashMap<String, (String, Str
         }
     }
     repos
+}
+
+/// Build the archlinux.org package page URL for a repo package.
+pub fn package_url(repo: &str, arch: &str, package: &str) -> String {
+    format!("https://archlinux.org/packages/{repo}/{arch}/{package}/")
+}
+
+/// Fetch repository name and URL from the local pacman sync database.
+async fn fetch_repositories(packages: &[String]) -> HashMap<String, (String, String)> {
+    if packages.is_empty() {
+        return HashMap::new();
+    }
+    let mut args = vec!["-Si"];
+    args.extend(packages.iter().map(|s| s.as_str()));
+
+    let output = match Command::new("pacman").args(&args).output().await {
+        Ok(o) => o,
+        Err(_) => return HashMap::new(),
+    };
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    parse_si_repositories(&stdout)
 }
 
 /// Check if a reboot is needed by looking for the running kernel's modules.
@@ -242,10 +253,7 @@ pub async fn check_updates() -> Result<CheckResult, String> {
         for u in &mut updates {
             if let Some((repo, arch)) = repos.get(&u.package) {
                 u.repository = repo.clone();
-                u.url = format!(
-                    "https://archlinux.org/packages/{}/{}/{}/",
-                    repo, arch, u.package
-                );
+                u.url = package_url(repo, arch, &u.package);
             }
         }
     }
