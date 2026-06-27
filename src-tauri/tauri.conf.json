@@ -1,7 +1,7 @@
 {
   "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
   "productName": "yay-sys-tray",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "identifier": "com.github.skint007.yay-sys-tray",
   "build": {
     "frontendDist": "../dist",
