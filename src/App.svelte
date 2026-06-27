@@ -20,12 +20,30 @@
   }
 
   // Per-view window size, seeded with defaults but remembered across switches
-  // (so resizing the Updates window and coming back keeps your size).
-  const sizes: Record<string, [number, number]> = {
+  // (so resizing the Updates window and coming back keeps your size) and
+  // persisted to localStorage so it survives an app restart too.
+  const SIZE_KEY = "ys-view-sizes";
+  const defaultSizes: Record<string, [number, number]> = {
     updates: [900, 620],
     settings: [560, 700],
     about: [480, 470],
   };
+
+  function loadSizes(): Record<string, [number, number]> {
+    const result = { ...defaultSizes };
+    try {
+      const saved = JSON.parse(localStorage.getItem(SIZE_KEY) ?? "{}");
+      for (const view of Object.keys(defaultSizes)) {
+        const v = saved[view];
+        if (Array.isArray(v) && v.length === 2 && v.every((n) => typeof n === "number" && n > 0)) {
+          result[view] = [v[0], v[1]];
+        }
+      }
+    } catch {}
+    return result;
+  }
+
+  const sizes: Record<string, [number, number]> = loadSizes();
   let scaleFactor = 1;
   let suppressSave = false;
   let appliedView: View = null;
@@ -65,6 +83,9 @@
         Math.round(payload.width / scaleFactor),
         Math.round(payload.height / scaleFactor),
       ];
+      try {
+        localStorage.setItem(SIZE_KEY, JSON.stringify(sizes));
+      } catch {}
     });
 
     listen<{ view: string }>("open-window", (event) => {
