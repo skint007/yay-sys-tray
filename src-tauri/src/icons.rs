@@ -39,46 +39,40 @@ pub fn create_ok_icon() -> Image<'static> {
     )
 }
 
-/// Orange circle with update count.
-pub fn create_updates_icon(count: u32) -> Image<'static> {
+/// Filled circle with the update count (shared by the updates/restart icons).
+///
+/// Sizes are deliberately large and a same-colour stroke thickens the glyphs:
+/// usvg doesn't always resolve a real bold face for the generic `sans-serif`
+/// family, so the stroke guarantees a heavy, legible number at tray size.
+fn create_count_icon(count: u32, fill: &str) -> Image<'static> {
     let text = if count <= 99 {
         count.to_string()
     } else {
         "99+".to_string()
     };
     let font_size = match text.len() {
-        1 => 36,
-        2 => 30,
-        _ => 22,
+        1 => 44,
+        2 => 36,
+        _ => 28,
     };
     render_svg(&format!(
         r##"<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64">
-  <circle cx="32" cy="32" r="30" fill="#FF9800"/>
+  <circle cx="32" cy="32" r="30" fill="{fill}"/>
   <text x="32" y="34" text-anchor="middle" dominant-baseline="central"
-    fill="white" font-family="sans-serif" font-size="{font_size}" font-weight="bold">{text}</text>
+    fill="white" stroke="white" stroke-width="2" paint-order="stroke"
+    font-family="sans-serif" font-size="{font_size}" font-weight="bold">{text}</text>
 </svg>"##
     ))
 }
 
+/// Orange circle with update count.
+pub fn create_updates_icon(count: u32) -> Image<'static> {
+    create_count_icon(count, "#FF9800")
+}
+
 /// Red circle with update count — restart needed.
 pub fn create_restart_icon(count: u32) -> Image<'static> {
-    let text = if count <= 99 {
-        count.to_string()
-    } else {
-        "99+".to_string()
-    };
-    let font_size = match text.len() {
-        1 => 36,
-        2 => 30,
-        _ => 22,
-    };
-    render_svg(&format!(
-        r##"<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64">
-  <circle cx="32" cy="32" r="30" fill="#F44336"/>
-  <text x="32" y="34" text-anchor="middle" dominant-baseline="central"
-    fill="white" font-family="sans-serif" font-size="{font_size}" font-weight="bold">{text}</text>
-</svg>"##
-    ))
+    create_count_icon(count, "#F44336")
 }
 
 /// Red circle with exclamation mark — reboot needed.
