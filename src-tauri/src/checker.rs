@@ -59,20 +59,20 @@ pub struct CheckResult {
 }
 
 /// Parse "package old_version -> new_version" lines into UpdateInfo list.
+/// Tolerates trailing annotations after the new version — yay 13+ appends a
+/// time-since-release marker (e.g. "[20h11m]") and pacman may append
+/// "[ignored]" — so the arrow is located by position rather than assumed to
+/// be the second-to-last token.
 pub fn parse_update_output(output: &str) -> Vec<UpdateInfo> {
     output
         .lines()
         .filter_map(|line| {
-            let line = line.trim();
-            if line.is_empty() || !line.contains(" -> ") {
-                return None;
-            }
             let parts: Vec<&str> = line.split_whitespace().collect();
-            if parts.len() >= 4 && parts[parts.len() - 2] == "->" {
+            if parts.len() >= 4 && parts[2] == "->" {
                 Some(UpdateInfo {
                     package: parts[0].to_string(),
                     old_version: parts[1].to_string(),
-                    new_version: parts[parts.len() - 1].to_string(),
+                    new_version: parts[3].to_string(),
                     description: String::new(),
                     repository: String::new(),
                     url: String::new(),
@@ -281,4 +281,37 @@ pub async fn check_updates() -> Result<CheckResult, String> {
         updates,
         reboot_info: Some(reboot_info),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_checkupdates_output() {
+        let out = "linux 6.9.1-1 -> 6.9.2-1\nsystemd 255.6-1 -> 255.7-1\n";
+        let updates = parse_update_output(out);
+        assert_eq!(updates.len(), 2);
+        assert_eq!(updates[0].package, "linux");
+        assert_eq!(updates[0].old_version, "6.9.1-1");
+        assert_eq!(updates[0].new_version, "6.9.2-1");
+    }
+
+    #[test]
+    fn parses_yay_output_with_time_annotation() {
+        let out = "oh-my-posh-bin 29.17.0-1 -> 29.20.0-1 [20h11m]\n\
+                   visual-studio-code-bin 1.125.0-1 -> 1.127.0-1 [2d5h]\n";
+        let updates = parse_update_output(out);
+        assert_eq!(updates.len(), 2);
+        assert_eq!(updates[0].package, "oh-my-posh-bin");
+        assert_eq!(updates[0].old_version, "29.17.0-1");
+        assert_eq!(updates[0].new_version, "29.20.0-1");
+        assert_eq!(updates[1].new_version, "1.127.0-1");
+    }
+
+    #[test]
+    fn ignores_malformed_lines() {
+        let out = "\nsome random noise\npkg 1.0-1 ->\n:: querying AUR...\n";
+        assert!(parse_update_output(out).is_empty());
+    }
 }
