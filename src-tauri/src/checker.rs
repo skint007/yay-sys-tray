@@ -58,28 +58,39 @@ pub struct CheckResult {
     pub reboot_info: Option<RebootInfo>,
 }
 
+/// Pacman versions always carry a numeric component and a `-pkgrel` suffix;
+/// requiring both keeps stray status/warning lines from parsing as updates
+/// (fake package names would otherwise flow into shell commands downstream).
+fn looks_like_version(s: &str) -> bool {
+    s.contains('-') && s.chars().any(|c| c.is_ascii_digit())
+}
+
 /// Parse "package old_version -> new_version" lines into UpdateInfo list.
-/// Tolerates trailing annotations after the new version — yay 13+ appends a
-/// time-since-release marker (e.g. "[20h11m]") and pacman may append
-/// "[ignored]" — so the arrow is located by position rather than assumed to
-/// be the second-to-last token.
+/// The arrow is located by search rather than fixed position so annotations
+/// around the versions — e.g. the time-since-release marker yay 13+ appends
+/// ("[20h11m]") or pacman's "[ignored]" — don't drop the line.
 pub fn parse_update_output(output: &str) -> Vec<UpdateInfo> {
     output
         .lines()
         .filter_map(|line| {
             let parts: Vec<&str> = line.split_whitespace().collect();
-            if parts.len() >= 4 && parts[2] == "->" {
-                Some(UpdateInfo {
-                    package: parts[0].to_string(),
-                    old_version: parts[1].to_string(),
-                    new_version: parts[3].to_string(),
-                    description: String::new(),
-                    repository: String::new(),
-                    url: String::new(),
-                })
-            } else {
-                None
+            let arrow = parts.iter().position(|&p| p == "->")?;
+            if arrow < 2 || arrow + 1 >= parts.len() {
+                return None;
             }
+            let old_version = parts[arrow - 1];
+            let new_version = parts[arrow + 1];
+            if !looks_like_version(old_version) || !looks_like_version(new_version) {
+                return None;
+            }
+            Some(UpdateInfo {
+                package: parts[0].to_string(),
+                old_version: old_version.to_string(),
+                new_version: new_version.to_string(),
+                description: String::new(),
+                repository: String::new(),
+                url: String::new(),
+            })
         })
         .collect()
 }
@@ -312,6 +323,23 @@ mod tests {
     #[test]
     fn ignores_malformed_lines() {
         let out = "\nsome random noise\npkg 1.0-1 ->\n:: querying AUR...\n";
+        assert!(parse_update_output(out).is_empty());
+    }
+
+    #[test]
+    fn tolerates_multiple_trailing_annotations() {
+        let out = "pkg 1.0-1 -> 1.1-1 [ignored] [20h11m]\n";
+        let updates = parse_update_output(out);
+        assert_eq!(updates.len(), 1);
+        assert_eq!(updates[0].old_version, "1.0-1");
+        assert_eq!(updates[0].new_version, "1.1-1");
+    }
+
+    #[test]
+    fn rejects_noise_lines_without_version_shapes() {
+        // ≥5-token noise shaped "word word -> word junk" must not become an
+        // update — fake package names would reach shell commands downstream.
+        let out = "warning: database -> outdated (run pacman -Sy)\nfoo bar -> baz qux\n";
         assert!(parse_update_output(out).is_empty());
     }
 }
