@@ -3,56 +3,71 @@ use crate::AppState;
 use tauri::{Emitter, Manager};
 use tokio::process::Command;
 
-/// Base terminal command (without hold/title flags).
-fn terminal_base(terminal: &str) -> Vec<String> {
-    let base: &[&str] = match terminal {
-        "kitty" => &["kitty"],
-        "konsole" => &["konsole", "-e"],
-        "alacritty" => &["alacritty", "-e"],
-        "foot" => &["foot"],
-        "xterm" => &["xterm", "-e"],
-        _ => return vec![terminal.to_string(), "-e".to_string()],
-    };
-    base.iter().map(|s| s.to_string()).collect()
+/// How to invoke a given terminal emulator. One row per known terminal instead
+/// of the same knowledge scattered across three parallel match arms, so adding
+/// a terminal is a single table entry and the flags for one terminal can't drift
+/// apart.
+struct TermSpec {
+    /// Leading argv — the program plus any subcommand (e.g. `["wezterm", "start"]`).
+    argv0: &'static [&'static str],
+    /// Flag/separator placed just before the command to run (`-e`, `--`, `-x`),
+    /// or `None` when the command is positional (kitty/foot).
+    exec_flag: Option<&'static str>,
+    /// Flag that keeps the window open after the command exits, if supported.
+    hold_flag: Option<&'static str>,
+    /// Flag that sets the window title, if supported.
+    title_flag: Option<&'static str>,
 }
 
-fn hold_flag(terminal: &str) -> &'static str {
+/// Look up a terminal's invocation spec. Unknown terminals fall back to a
+/// minimal `<term> -e <cmd>` with no hold/title flags: `-e` is the most widely
+/// supported exec flag, and blindly adding `--hold`/title flags a terminal
+/// doesn't accept makes it reject the whole command line and never launch.
+fn term_spec(terminal: &str) -> TermSpec {
     match terminal {
-        "xterm" => "-hold",
-        _ => "--hold",
-    }
-}
-
-fn title_flag(terminal: &str) -> Option<&'static str> {
-    match terminal {
-        "kitty" | "alacritty" | "foot" => Some("--title"),
-        "xterm" => Some("-T"),
-        _ => None, // konsole has no simple title flag
+        "kitty" => TermSpec { argv0: &["kitty"], exec_flag: None, hold_flag: Some("--hold"), title_flag: Some("--title") },
+        "konsole" => TermSpec { argv0: &["konsole"], exec_flag: Some("-e"), hold_flag: Some("--hold"), title_flag: None },
+        "alacritty" => TermSpec { argv0: &["alacritty"], exec_flag: Some("-e"), hold_flag: Some("--hold"), title_flag: Some("--title") },
+        "foot" => TermSpec { argv0: &["foot"], exec_flag: None, hold_flag: Some("--hold"), title_flag: Some("--title") },
+        "xterm" => TermSpec { argv0: &["xterm"], exec_flag: Some("-e"), hold_flag: Some("-hold"), title_flag: Some("-T") },
+        "xfce4-terminal" => TermSpec { argv0: &["xfce4-terminal"], exec_flag: Some("-x"), hold_flag: Some("--hold"), title_flag: Some("--title") },
+        // gnome-terminal/ptyxis/wezterm take the command after `--`; none has a
+        // usable hold flag, so leave it off rather than break the launch.
+        "gnome-terminal" => TermSpec { argv0: &["gnome-terminal"], exec_flag: Some("--"), hold_flag: None, title_flag: None },
+        "ptyxis" => TermSpec { argv0: &["ptyxis"], exec_flag: Some("--"), hold_flag: None, title_flag: None },
+        "wezterm" => TermSpec { argv0: &["wezterm", "start"], exec_flag: Some("--"), hold_flag: None, title_flag: None },
+        _ => TermSpec { argv0: &[], exec_flag: Some("-e"), hold_flag: None, title_flag: None },
     }
 }
 
 /// Build a terminal command prefix, optionally holding the window open and
-/// setting its title.
+/// setting its title. Order: `program [hold] [title T] [exec_flag]` then the
+/// command the caller appends.
 fn terminal_prefix(terminal: &str, title: Option<&str>, hold: bool) -> Vec<String> {
-    let mut base = terminal_base(terminal);
+    let spec = term_spec(terminal);
+    let mut out: Vec<String> = Vec::new();
+
+    if spec.argv0.is_empty() {
+        // Unknown terminal: the configured name is the program.
+        out.push(terminal.to_string());
+    } else {
+        out.extend(spec.argv0.iter().map(|s| s.to_string()));
+    }
 
     if hold {
-        // Insert the hold flag right after the program name.
-        base.insert(1, hold_flag(terminal).to_string());
-    }
-
-    if let (Some(title), Some(flag)) = (title, title_flag(terminal)) {
-        // Place the title flag before "-e" if present, else append.
-        if let Some(pos) = base.iter().position(|s| s == "-e") {
-            base.insert(pos, title.to_string());
-            base.insert(pos, flag.to_string());
-        } else {
-            base.push(flag.to_string());
-            base.push(title.to_string());
+        if let Some(flag) = spec.hold_flag {
+            out.push(flag.to_string());
         }
     }
+    if let (Some(title), Some(flag)) = (title, spec.title_flag) {
+        out.push(flag.to_string());
+        out.push(title.to_string());
+    }
+    if let Some(flag) = spec.exec_flag {
+        out.push(flag.to_string());
+    }
 
-    base
+    out
 }
 
 /// Wrap a reboot command with the configured delay (Ctrl+C in the terminal cancels).
@@ -61,6 +76,36 @@ fn delayed_reboot_cmd(reboot_cmd: &str, delay: u32) -> String {
         reboot_cmd.to_string()
     } else {
         format!("echo 'Rebooting in {delay}s (Ctrl+C to cancel)...' && sleep {delay} && {reboot_cmd}")
+    }
+}
+
+/// Assemble a pacman/yay command line as a single shell string, appending
+/// `--noconfirm` and an optional `&& <reboot>` chain. Used for the cases that
+/// must run through a shell (the reboot chain, and every remote command, which
+/// runs under the ssh login shell). One place so the noconfirm/reboot logic
+/// can't diverge across the six update/remove entry points.
+fn build_shell_cmd(base: &str, noconfirm: bool, reboot: Option<(&str, u32)>) -> String {
+    let mut cmd = base.to_string();
+    if noconfirm {
+        cmd.push_str(" --noconfirm");
+    }
+    if let Some((reboot_cmd, delay)) = reboot {
+        cmd.push_str(&format!(" && {}", delayed_reboot_cmd(reboot_cmd, delay)));
+    }
+    cmd
+}
+
+/// The reboot chain to append when `restart` is set, else `None`.
+fn reboot_chain(restart: bool, reboot_cmd: &'static str, delay: u32) -> Option<(&'static str, u32)> {
+    restart.then_some((reboot_cmd, delay))
+}
+
+/// Passwordless installs can reboot without sudo (a NOPASSWD systemctl call).
+fn local_reboot_cmd(passwordless: bool) -> &'static str {
+    if passwordless {
+        "systemctl reboot"
+    } else {
+        "sudo reboot"
     }
 }
 
@@ -92,12 +137,8 @@ pub async fn run_local_update(app_handle: tauri::AppHandle, restart: bool) {
     let prefix = terminal_prefix(&cfg.terminal, Some("Updating: local"), cfg.hold);
 
     let yay_cmd = if restart {
-        let mut cmd = "yay -Syu".to_string();
-        if cfg.noconfirm {
-            cmd.push_str(" --noconfirm");
-        }
-        let reboot = if cfg.passwordless { "systemctl reboot" } else { "sudo reboot" };
-        cmd.push_str(&format!(" && {}", delayed_reboot_cmd(reboot, cfg.delay)));
+        let reboot = local_reboot_cmd(cfg.passwordless);
+        let cmd = build_shell_cmd("yay -Syu", cfg.noconfirm, Some((reboot, cfg.delay)));
         vec!["bash".to_string(), "-c".to_string(), cmd]
     } else {
         let mut cmd = vec!["yay".to_string(), "-Syu".to_string()];
@@ -123,14 +164,12 @@ pub async fn run_local_update_packages(
     let prefix = terminal_prefix(&cfg.terminal, Some("Updating: selected"), cfg.hold);
 
     let yay_cmd = if restart {
-        let mut cmd = format!("yay -S {}", packages.join(" "));
-        if cfg.noconfirm {
-            cmd.push_str(" --noconfirm");
-        }
-        let reboot = if cfg.passwordless { "systemctl reboot" } else { "sudo reboot" };
-        cmd.push_str(&format!(" && {}", delayed_reboot_cmd(reboot, cfg.delay)));
+        let reboot = local_reboot_cmd(cfg.passwordless);
+        let base = format!("yay -S {}", packages.join(" "));
+        let cmd = build_shell_cmd(&base, cfg.noconfirm, Some((reboot, cfg.delay)));
         vec!["bash".to_string(), "-c".to_string(), cmd]
     } else {
+        // No reboot chain needed, so pass packages as separate argv (no shell).
         let mut cmd = vec!["yay".to_string(), "-S".to_string()];
         cmd.extend(packages);
         if cfg.noconfirm {
@@ -148,13 +187,11 @@ pub async fn run_remote_update(app_handle: tauri::AppHandle, hostname: &str, res
     let target = ssh_target(hostname, &cfg.ssh_user);
     let prefix = terminal_prefix(&cfg.terminal, Some(&format!("Updating: {hostname}")), cfg.hold);
 
-    let mut cmd = "sudo pacman -Syu".to_string();
-    if cfg.noconfirm {
-        cmd.push_str(" --noconfirm");
-    }
-    if restart {
-        cmd.push_str(&format!(" && {}", delayed_reboot_cmd("sudo reboot", cfg.delay)));
-    }
+    let cmd = build_shell_cmd(
+        "sudo pacman -Syu",
+        cfg.noconfirm,
+        reboot_chain(restart, "sudo reboot", cfg.delay),
+    );
 
     spawn_with(app_handle, prefix, vec!["ssh".to_string(), target, cmd], hostname.to_string()).await;
 }
@@ -174,13 +211,8 @@ pub async fn run_remote_update_packages(
     let prefix =
         terminal_prefix(&cfg.terminal, Some(&format!("Updating: {hostname} (selected)")), cfg.hold);
 
-    let mut cmd = format!("sudo pacman -S {}", packages.join(" "));
-    if cfg.noconfirm {
-        cmd.push_str(" --noconfirm");
-    }
-    if restart {
-        cmd.push_str(&format!(" && {}", delayed_reboot_cmd("sudo reboot", cfg.delay)));
-    }
+    let base = format!("sudo pacman -S {}", packages.join(" "));
+    let cmd = build_shell_cmd(&base, cfg.noconfirm, reboot_chain(restart, "sudo reboot", cfg.delay));
 
     spawn_with(app_handle, prefix, vec!["ssh".to_string(), target, cmd], hostname.to_string()).await;
 }
@@ -210,10 +242,8 @@ pub async fn run_remote_remove(
     let prefix =
         terminal_prefix(&cfg.terminal, Some(&format!("Removing: {package} ({hostname})")), cfg.hold);
 
-    let mut cmd = format!("sudo pacman -{flags} {package}");
-    if cfg.noconfirm {
-        cmd.push_str(" --noconfirm");
-    }
+    let base = format!("sudo pacman -{flags} {package}");
+    let cmd = build_shell_cmd(&base, cfg.noconfirm, None);
 
     spawn_with(app_handle, prefix, vec!["ssh".to_string(), target, cmd], hostname.to_string()).await;
 }

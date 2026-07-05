@@ -39,18 +39,18 @@ pub async fn get_pactree(
     reverse: bool,
     hostname: Option<String>,
 ) -> Result<String, String> {
-    let target = match hostname {
+    let (target, timeout) = match hostname {
         Some(h) if !h.is_empty() => {
-            let user = {
+            let (user, timeout) = {
                 let state = app_handle.state::<AppState>();
                 let config = state.config.read().await;
-                config.tailscale_ssh_user.clone()
+                (config.tailscale_ssh_user.clone(), config.tailscale_timeout)
             };
-            tailscale::ssh_target(&h, &user)
+            (tailscale::ssh_target(&h, &user), timeout)
         }
-        _ => String::new(),
+        _ => (String::new(), 0),
     };
-    system::get_pactree(&package, reverse, &target).await
+    system::get_pactree(&package, reverse, &target, timeout).await
 }
 
 #[tauri::command]

@@ -90,11 +90,6 @@ pub fn create_reboot_icon() -> Image<'static> {
     )
 }
 
-/// Blue circle with circular arrow — checking in progress.
-pub fn create_checking_icon() -> Image<'static> {
-    render_svg(create_checking_svg(0.0).as_str())
-}
-
 /// Red circle with X — error.
 pub fn create_error_icon() -> Image<'static> {
     render_svg(

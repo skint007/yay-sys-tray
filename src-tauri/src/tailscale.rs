@@ -1,6 +1,6 @@
 use crate::checker::{
-    kernel_package_for, package_requires_restart, package_url, parse_si_repositories,
-    parse_update_output, UpdateInfo, KERNEL_PACKAGES,
+    kernel_package_for, maybe_kernel_pkg, package_requires_restart, package_url,
+    parse_si_repositories, parse_update_output, UpdateInfo,
 };
 use serde::Serialize;
 use std::collections::{HashMap, HashSet};
@@ -123,7 +123,7 @@ pub fn ssh_target(hostname: &str, ssh_user: &str) -> String {
 }
 
 /// Run a command on a host over SSH (with a hard wall-clock timeout).
-async fn ssh_run(target: &str, command: &str, timeout: u32) -> std::io::Result<std::process::Output> {
+pub async fn ssh_run(target: &str, command: &str, timeout: u32) -> std::io::Result<std::process::Output> {
     let mut args: Vec<String> = vec!["-o".into(), format!("ConnectTimeout={timeout}")];
     for opt in SSH_OPTS {
         args.push(opt.to_string());
@@ -144,8 +144,19 @@ async fn ssh_run(target: &str, command: &str, timeout: u32) -> std::io::Result<s
 /// Determine the remote running kernel package — only queried when there are
 /// kernel updates (the flavor is irrelevant otherwise).
 async fn remote_kernel_package(target: &str, updates: &[UpdateInfo], timeout: u32) -> Option<String> {
-    if !updates.iter().any(|u| KERNEL_PACKAGES.contains(&u.package.as_str())) {
+    if !updates.iter().any(|u| maybe_kernel_pkg(&u.package)) {
         return None;
+    }
+    // Prefer the exact package from the running kernel's modules `pkgbase` file
+    // (handles linux-cachyos, AUR kernels, etc.); fall back to sniffing the
+    // release string if that file can't be read.
+    if let Ok(out) = ssh_run(target, "cat \"/usr/lib/modules/$(uname -r)/pkgbase\"", timeout).await {
+        if out.status.success() {
+            let name = String::from_utf8_lossy(&out.stdout).trim().to_string();
+            if !name.is_empty() {
+                return Some(name);
+            }
+        }
     }
     let out = ssh_run(target, "uname -r", timeout).await.ok()?;
     if out.status.success() {
