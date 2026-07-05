@@ -213,8 +213,30 @@ pub fn parse_si_repositories(stdout: &str) -> HashMap<String, (String, String)> 
     repos
 }
 
-/// Build the archlinux.org package page URL for a repo package.
+/// Repos hosted on archlinux.org — only these get a package page URL. Packages
+/// from custom/self-hosted repos (e.g. a personal pacman repo) have no
+/// archlinux.org page, so linking there would 404. Must stay in sync with
+/// OFFICIAL_REPOS in src/lib/repo.ts, which orders the repo groups in the UI.
+static OFFICIAL_REPOS: &[&str] = &[
+    "core",
+    "extra",
+    "multilib",
+    "core-testing",
+    "extra-testing",
+    "multilib-testing",
+    "core-staging",
+    "extra-staging",
+    "multilib-staging",
+    "kde-unstable",
+    "gnome-unstable",
+];
+
+/// Build the archlinux.org package page URL for an official repo package, or
+/// an empty string for custom-repo packages (the UI hides the link).
 pub fn package_url(repo: &str, arch: &str, package: &str) -> String {
+    if !OFFICIAL_REPOS.contains(&repo) {
+        return String::new();
+    }
     format!("https://archlinux.org/packages/{repo}/{arch}/{package}/")
 }
 
@@ -426,6 +448,38 @@ mod tests {
         // Running kernel unknown → any recognized kernel package is conservative.
         assert!(package_requires_restart("linux-zen", None));
         assert!(!package_requires_restart("firefox", None));
+    }
+
+    #[test]
+    fn package_url_only_for_official_repos() {
+        assert_eq!(
+            package_url("extra", "x86_64", "firefox"),
+            "https://archlinux.org/packages/extra/x86_64/firefox/"
+        );
+        // Staging/testing/unstable variants are hosted on archlinux.org too.
+        assert!(!package_url("core-staging", "x86_64", "glibc").is_empty());
+        assert!(!package_url("kde-unstable", "x86_64", "plasma-desktop").is_empty());
+        // Custom repos (e.g. a personal pacman repo) have no archlinux.org
+        // page — the URL must stay empty so the UI hides the link.
+        assert_eq!(package_url("paw", "x86_64", "some-tool"), "");
+    }
+
+    #[test]
+    fn official_repos_matches_frontend_list() {
+        // OFFICIAL_REPOS is duplicated across the Rust/TS boundary (URL gating
+        // here, UI group ordering in src/lib/repo.ts). Parse the TS source and
+        // compare so the two copies can't silently drift.
+        let ts_path =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../src/lib/repo.ts");
+        let ts = std::fs::read_to_string(&ts_path).expect("read src/lib/repo.ts");
+        let block = ts
+            .split("OFFICIAL_REPOS = [")
+            .nth(1)
+            .and_then(|rest| rest.split(']').next())
+            .expect("OFFICIAL_REPOS array literal in repo.ts");
+        // String literals are every odd-indexed piece when splitting on quotes.
+        let ts_repos: Vec<&str> = block.split('"').skip(1).step_by(2).collect();
+        assert_eq!(ts_repos, OFFICIAL_REPOS);
     }
 
     #[test]

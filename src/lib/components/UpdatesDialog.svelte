@@ -12,6 +12,7 @@
     runRemoteUpdatePackages,
     runUpdateSelected,
   } from "../ipc";
+  import { repoRank, repoColorVar, UNKNOWN_REPO } from "../repo";
   import UpdateCard from "./UpdateCard.svelte";
   import Reticle from "./Reticle.svelte";
   import DependencyTree from "./DependencyTree.svelte";
@@ -100,20 +101,35 @@
   let activeHost = $derived(hosts.find((h) => h.key === activeKey) ?? hosts[0]);
   let activeSelected = $derived(selectedByHost[activeKey] ?? []);
 
+  type RepoGroup = { name: string; updates: UpdateInfo[] };
+
   let grouped = $derived.by(() => {
     const h = activeHost;
-    if (!h) return { restart: [] as UpdateInfo[], normal: [] as UpdateInfo[] };
+    if (!h) return { restart: [] as UpdateInfo[], repos: [] as RepoGroup[], visible: [] as UpdateInfo[] };
     const q = search.toLowerCase();
     const ups = h.updates.filter((u) => !q || u.package.toLowerCase().includes(q));
     const rset = new Set(h.restartPkgs);
     const byName = (a: UpdateInfo, b: UpdateInfo) => a.package.localeCompare(b.package);
-    return {
-      restart: ups.filter((u) => rset.has(u.package)).sort(byName),
-      normal: ups.filter((u) => !rset.has(u.package)).sort(byName),
-    };
+    const restart: UpdateInfo[] = [];
+    const byRepo = new Map<string, UpdateInfo[]>();
+    for (const u of ups) {
+      if (rset.has(u.package)) {
+        restart.push(u);
+        continue;
+      }
+      const repo = u.repository || UNKNOWN_REPO;
+      const group = byRepo.get(repo);
+      if (group) group.push(u);
+      else byRepo.set(repo, [u]);
+    }
+    restart.sort(byName);
+    const repos = [...byRepo.entries()]
+      .map(([name, updates]) => ({ name, updates: updates.sort(byName) }))
+      .sort((a, b) => repoRank(a.name) - repoRank(b.name) || a.name.localeCompare(b.name));
+    return { restart, repos, visible: [...restart, ...repos.flatMap((r) => r.updates)] };
   });
 
-  let visiblePkgs = $derived([...grouped.restart, ...grouped.normal].map((u) => u.package));
+  let visiblePkgs = $derived(grouped.visible.map((u) => u.package));
   let selCount = $derived(activeSelected.length);
   let allSelected = $derived(visiblePkgs.length > 0 && visiblePkgs.every((p) => activeSelected.includes(p)));
   let primaryLabel = $derived.by(() => {
@@ -429,9 +445,12 @@
             />
           {/each}
         {/if}
-        {#if grouped.normal.length > 0}
-          <div class="section all"><span class="sdot"></span>ALL UPDATES</div>
-          {#each grouped.normal as u (u.package)}
+        {#each grouped.repos as r (r.name)}
+          <div class="section repo" style={`--c: ${repoColorVar(r.name, "--ys-pending")}`}>
+            <span class="sdot"></span>{r.name.toUpperCase()}
+            <span class="scount">{r.updates.length}</span>
+          </div>
+          {#each r.updates as u (u.package)}
             <UpdateCard
               update={u}
               compact={density === "compact"}
@@ -441,7 +460,7 @@
               onShowDeps={(reverse) => (showDeps = { pkg: u.package, reverse, repo: u.repository, host: activeKey === "local" ? null : activeKey })}
             />
           {/each}
-        {/if}
+        {/each}
       </main>
     </div>
 
@@ -589,7 +608,12 @@
   .sdot { width: 6px; height: 6px; border-radius: 50%; }
   .section.restart { color: var(--ys-danger); }
   .section.restart .sdot { background: var(--ys-danger); }
-  .section.all .sdot { background: var(--ys-pending); }
+  .section.repo .sdot { background: var(--c, var(--ys-pending)); }
+  .scount {
+    font-family: var(--font-mono); font-weight: 600; font-size: 10px;
+    color: var(--ys-text-dim); background: var(--ys-surface);
+    border-radius: 7px; padding: 0 6px;
+  }
 
   .footer {
     display: flex; align-items: center; justify-content: space-between;

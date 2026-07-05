@@ -1,6 +1,7 @@
 <script lang="ts">
   import { open as openUrl } from "@tauri-apps/plugin-shell";
   import type { UpdateInfo } from "../types";
+  import { repoColorVar } from "../repo";
   import VersionDiff from "./VersionDiff.svelte";
 
   let {
@@ -42,7 +43,7 @@
     <div class="name-row">
       <span class="pkg">{update.package}</span>
       {#if update.repository}
-        <span class="pbadge repo" style={`--c: var(--ys-repo-${update.repository}, var(--ys-text-muted))`}>
+        <span class="pbadge repo" style={`--c: ${repoColorVar(update.repository, "--ys-text-muted")}`}>
           {update.repository}
         </span>
       {/if}
