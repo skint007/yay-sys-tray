@@ -2,14 +2,28 @@ use serde::Serialize;
 use std::collections::HashMap;
 use tokio::process::Command;
 
-/// Kernel packages: only the flavor you're booted into requires a restart when
-/// updated (a `linux` update shouldn't demand a reboot when running `linux-lts`).
+/// Well-known kernel packages, used only as a conservative fallback when the
+/// running kernel's owning package can't be determined (see
+/// [`running_kernel_package`]). The real restart decision is an exact match
+/// against the running kernel package, so non-standard kernels (linux-cachyos,
+/// AUR kernels) are handled without needing to appear here.
 pub static KERNEL_PACKAGES: &[&str] = &["linux", "linux-lts", "linux-zen", "linux-hardened"];
 
-/// Packages that always require a system restart when updated.
-pub static ALWAYS_RESTART_PACKAGES: &[&str] = &["systemd", "glibc", "nvidia", "nvidia-lts"];
+/// Packages that always require a system restart when updated. Includes the
+/// nvidia driver variants (nvidia-open is the current Arch default) since a
+/// driver update swaps the loaded kernel module.
+pub static ALWAYS_RESTART_PACKAGES: &[&str] = &[
+    "systemd",
+    "glibc",
+    "nvidia",
+    "nvidia-lts",
+    "nvidia-open",
+    "nvidia-open-dkms",
+    "nvidia-dkms",
+];
 
-/// Map a `uname -r` release string to its kernel package name.
+/// Map a `uname -r` release string to its kernel package name. Only a fallback
+/// for when the exact package can't be read from the modules `pkgbase` file.
 pub fn kernel_package_for(release: &str) -> &'static str {
     if release.contains("-zen") {
         "linux-zen"
@@ -22,16 +36,45 @@ pub fn kernel_package_for(release: &str) -> &'static str {
     }
 }
 
-/// Whether updating `package` requires a restart. For kernel packages, only the
-/// running flavor counts; `None` treats kernel updates conservatively as needing
-/// a restart (running kernel couldn't be determined).
-pub fn package_requires_restart(package: &str, running_kernel_pkg: Option<&str>) -> bool {
-    if KERNEL_PACKAGES.contains(&package) {
-        running_kernel_pkg.is_none() || running_kernel_pkg == Some(package)
-    } else {
-        ALWAYS_RESTART_PACKAGES.contains(&package)
-    }
+/// The package that owns the currently-running kernel. Arch writes the package
+/// base name into `/usr/lib/modules/<release>/pkgbase`, which is exact even for
+/// non-standard kernels (linux-zen, linux-cachyos, AUR kernels). Falls back to
+/// sniffing the release string only when that file can't be read.
+pub fn running_kernel_package(release: &str) -> String {
+    let pkgbase = std::path::Path::new("/usr/lib/modules")
+        .join(release)
+        .join("pkgbase");
+    std::fs::read_to_string(&pkgbase)
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| kernel_package_for(release).to_string())
 }
+
+/// Could this package be a bootable kernel (as opposed to linux-firmware,
+/// linux-headers, …)? Used only to decide whether to bother querying a remote
+/// host's running kernel; the restart decision itself is an exact-name match.
+pub fn maybe_kernel_pkg(name: &str) -> bool {
+    name == "linux"
+        || (name.starts_with("linux-")
+            && !name.contains("headers")
+            && name != "linux-firmware"
+            && name != "linux-docs")
+}
+
+/// Whether updating `package` requires a restart. Updating the exact package
+/// that owns the running kernel does; a different kernel flavor does not. When
+/// the running kernel is unknown, any recognized kernel package is treated
+/// conservatively as needing a restart.
+pub fn package_requires_restart(package: &str, running_kernel_pkg: Option<&str>) -> bool {
+    match running_kernel_pkg {
+        Some(running) if package == running => return true,
+        None if KERNEL_PACKAGES.contains(&package) => return true,
+        _ => {}
+    }
+    ALWAYS_RESTART_PACKAGES.contains(&package)
+}
+
 
 #[derive(Debug, Clone, Serialize)]
 pub struct UpdateInfo {
@@ -197,10 +240,10 @@ async fn check_reboot_needed(running: &str) -> RebootInfo {
     let modules_exist = std::path::Path::new(&format!("/lib/modules/{running}")).is_dir();
 
     // Detect which kernel package corresponds to the running kernel
-    let pkg = kernel_package_for(running);
+    let pkg = running_kernel_package(running);
 
     let installed = Command::new("pacman")
-        .args(["-Q", pkg])
+        .args(["-Q", &pkg])
         .output()
         .await
         .ok()
@@ -282,18 +325,19 @@ pub async fn check_updates() -> Result<CheckResult, String> {
         }
     }
 
-    // Determine the running kernel flavor once (reused for the reboot check).
+    // Determine the running kernel's exact owning package once (reused for the
+    // reboot check).
     let running_release = Command::new("uname")
         .arg("-r")
         .output()
         .await
         .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
         .unwrap_or_default();
-    let running_pkg = kernel_package_for(&running_release);
+    let running_pkg = running_kernel_package(&running_release);
 
     let restart_pkgs: Vec<String> = updates
         .iter()
-        .filter(|u| package_requires_restart(&u.package, Some(running_pkg)))
+        .filter(|u| package_requires_restart(&u.package, Some(&running_pkg)))
         .map(|u| u.package.clone())
         .collect();
 
@@ -362,5 +406,35 @@ mod tests {
         // it would otherwise flow unquoted into `yay -S`/`pacman -S` shells.
         let out = "openssl;reboot 1.0-1 -> 1.1-1\n$(id) 1.0-1 -> 1.1-1\na`b` 1.0-1 -> 1.1-1\n";
         assert!(parse_update_output(out).is_empty());
+    }
+
+    #[test]
+    fn restart_matches_running_kernel_exactly() {
+        // The exact running-kernel package (even a non-standard one) needs a
+        // restart; a different flavor that isn't running does not.
+        assert!(package_requires_restart("linux-cachyos", Some("linux-cachyos")));
+        assert!(!package_requires_restart("linux", Some("linux-cachyos")));
+        assert!(!package_requires_restart("linux-lts", Some("linux")));
+        assert!(package_requires_restart("linux", Some("linux")));
+    }
+
+    #[test]
+    fn restart_flags_always_and_unknown_kernel() {
+        // nvidia-open (current Arch default) and other always-restart packages.
+        assert!(package_requires_restart("nvidia-open", Some("linux")));
+        assert!(package_requires_restart("systemd", Some("linux")));
+        // Running kernel unknown → any recognized kernel package is conservative.
+        assert!(package_requires_restart("linux-zen", None));
+        assert!(!package_requires_restart("firefox", None));
+    }
+
+    #[test]
+    fn maybe_kernel_pkg_excludes_userspace() {
+        assert!(maybe_kernel_pkg("linux"));
+        assert!(maybe_kernel_pkg("linux-zen"));
+        assert!(maybe_kernel_pkg("linux-cachyos"));
+        assert!(!maybe_kernel_pkg("linux-firmware"));
+        assert!(!maybe_kernel_pkg("linux-headers"));
+        assert!(!maybe_kernel_pkg("firefox"));
     }
 }

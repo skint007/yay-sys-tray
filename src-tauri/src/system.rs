@@ -66,24 +66,38 @@ pub async fn restart_service() -> Result<(), String> {
     Ok(())
 }
 
-pub async fn get_pactree(package: &str, reverse: bool, ssh_target: &str) -> Result<String, String> {
+pub async fn get_pactree(
+    package: &str,
+    reverse: bool,
+    ssh_target: &str,
+    timeout: u32,
+) -> Result<String, String> {
     let output = if ssh_target.is_empty() {
         let mut args: Vec<&str> = Vec::new();
         if reverse {
             args.push("-r");
         }
         args.push(package);
-        Command::new("pactree").args(&args).output().await
+        Command::new("pactree")
+            .args(&args)
+            .output()
+            .await
+            .map_err(|e| e.to_string())?
     } else {
+        // Reuse the shared SSH runner so remote pactree gets the same
+        // BatchMode/ConnectTimeout options and a hard wall-clock timeout —
+        // otherwise the dependency-tree spinner hangs forever on an
+        // unreachable or password-prompting host.
         let remote = if reverse {
             format!("pactree -r {package}")
         } else {
             format!("pactree {package}")
         };
-        Command::new("ssh").args([ssh_target, &remote]).output().await
+        crate::tailscale::ssh_run(ssh_target, &remote, timeout)
+            .await
+            .map_err(|e| e.to_string())?
     };
 
-    let output = output.map_err(|e| e.to_string())?;
     if output.status.success() {
         Ok(String::from_utf8_lossy(&output.stdout).to_string())
     } else {
