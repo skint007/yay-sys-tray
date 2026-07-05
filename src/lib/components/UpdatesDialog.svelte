@@ -12,6 +12,7 @@
     runRemoteUpdatePackages,
     runUpdateSelected,
   } from "../ipc";
+  import { repoRank, repoColorVar } from "../repo";
   import UpdateCard from "./UpdateCard.svelte";
   import Reticle from "./Reticle.svelte";
   import DependencyTree from "./DependencyTree.svelte";
@@ -99,17 +100,6 @@
   let multiHost = $derived(hosts.length > 1);
   let activeHost = $derived(hosts.find((h) => h.key === activeKey) ?? hosts[0]);
   let activeSelected = $derived(selectedByHost[activeKey] ?? []);
-
-  // Official repos lead in pacman.conf order; custom repos (e.g. paw) follow
-  // alphabetically; AUR is last; packages with no known repo sink to the end.
-  const REPO_ORDER = ["core", "extra", "multilib", "core-testing", "extra-testing", "multilib-testing"];
-  function repoRank(repo: string): number {
-    const i = REPO_ORDER.indexOf(repo);
-    if (i !== -1) return i;
-    if (repo === "aur") return 200;
-    if (repo === "other") return 300;
-    return 100;
-  }
 
   type RepoGroup = { name: string; updates: UpdateInfo[] };
 
@@ -457,7 +447,7 @@
           {/each}
         {/if}
         {#each grouped.repos as r (r.name)}
-          <div class="section repo" style={`--c: var(--ys-repo-${r.name.replace(/[^a-zA-Z0-9-]/g, "-")}, var(--ys-pending))`}>
+          <div class="section repo" style={`--c: ${repoColorVar(r.name, "--ys-pending")}`}>
             <span class="sdot"></span>{r.name.toUpperCase()}
             <span class="scount">{r.updates.length}</span>
           </div>

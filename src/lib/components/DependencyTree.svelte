@@ -1,5 +1,6 @@
 <script lang="ts">
   import { getPactree } from "../ipc";
+  import { repoColorVar } from "../repo";
 
   let {
     packageName,
@@ -69,7 +70,7 @@
     <div class="head">
       <span class="pkg">{packageName}</span>
       {#if repository}
-        <span class="repo" style={`--c: var(--ys-repo-${repository}, var(--ys-text-muted))`}>{repository}</span>
+        <span class="repo" style={`--c: ${repoColorVar(repository, "--ys-text-muted")}`}>{repository}</span>
       {/if}
       <div class="spacer"></div>
       <div class="seg">

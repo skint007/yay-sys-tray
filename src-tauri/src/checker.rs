@@ -215,7 +215,8 @@ pub fn parse_si_repositories(stdout: &str) -> HashMap<String, (String, String)> 
 
 /// Repos hosted on archlinux.org — only these get a package page URL. Packages
 /// from custom/self-hosted repos (e.g. a personal pacman repo) have no
-/// archlinux.org page, so linking there would 404.
+/// archlinux.org page, so linking there would 404. Must stay in sync with
+/// OFFICIAL_REPOS in src/lib/repo.ts, which orders the repo groups in the UI.
 static OFFICIAL_REPOS: &[&str] = &[
     "core",
     "extra",
@@ -223,6 +224,9 @@ static OFFICIAL_REPOS: &[&str] = &[
     "core-testing",
     "extra-testing",
     "multilib-testing",
+    "core-staging",
+    "extra-staging",
+    "multilib-staging",
     "kde-unstable",
     "gnome-unstable",
 ];
@@ -452,6 +456,9 @@ mod tests {
             package_url("extra", "x86_64", "firefox"),
             "https://archlinux.org/packages/extra/x86_64/firefox/"
         );
+        // Staging/testing/unstable variants are hosted on archlinux.org too.
+        assert!(!package_url("core-staging", "x86_64", "glibc").is_empty());
+        assert!(!package_url("kde-unstable", "x86_64", "plasma-desktop").is_empty());
         // Custom repos (e.g. a personal pacman repo) have no archlinux.org
         // page — the URL must stay empty so the UI hides the link.
         assert_eq!(package_url("paw", "x86_64", "some-tool"), "");
