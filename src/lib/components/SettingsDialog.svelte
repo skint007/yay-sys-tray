@@ -34,17 +34,37 @@
     }
   });
 
+  // Empty <input type="number"> fields bind to null; coerce them back to a
+  // valid integer so save_config doesn't reject on a null and leave the dialog
+  // silently stuck open.
+  function num(v: unknown, fallback: number, min: number, max: number): number {
+    const n = typeof v === "number" && !Number.isNaN(v) ? v : fallback;
+    return Math.min(max, Math.max(min, n));
+  }
+
   async function handleSave() {
     if (!config) return;
-    if (config.check_interval_minutes < 5) config.check_interval_minutes = 5;
+    config.check_interval_minutes = num(config.check_interval_minutes, 60, 5, 1440);
+    config.restart_delay_seconds = num(config.restart_delay_seconds, 0, 0, 600);
+    config.tailscale_timeout = num(config.tailscale_timeout, 10, 5, 60);
     if (config.autostart !== initial.autostart) {
       try { await manageAutostart(config.autostart); initial.autostart = config.autostart; } catch (e) { console.error(e); }
     }
     if (config.passwordless_updates !== initial.passwordless) {
-      try { await managePasswordlessUpdates(config.passwordless_updates); initial.passwordless = config.passwordless_updates; } catch (e) { console.error(e); }
+      try {
+        const ok = await managePasswordlessUpdates(config.passwordless_updates);
+        // The pkexec prompt was cancelled (or the sudoers rule wasn't written),
+        // so don't persist a setting the system can't actually honor.
+        if (config.passwordless_updates && !ok) config.passwordless_updates = false;
+        initial.passwordless = config.passwordless_updates;
+      } catch (e) { console.error(e); config.passwordless_updates = initial.passwordless; }
     }
-    await saveConfig(config);
-    onclose();
+    try {
+      await saveConfig(config);
+      onclose();
+    } catch (e) {
+      console.error("Failed to save config:", e);
+    }
   }
 </script>
 
@@ -86,7 +106,7 @@
           <ToggleSwitch bind:checked={config.check_interval_enabled} />
         </div>
 
-        <div class="grid3">
+        <div class="grid2">
           <div class="scard small">
             <div class="scard-label">NOTIFICATIONS</div>
             <select class="ys-select" bind:value={config.notify}>
@@ -98,10 +118,6 @@
           <div class="scard small">
             <div class="scard-label">TERMINAL</div>
             <input class="ys-input" type="text" bind:value={config.terminal} />
-          </div>
-          <div class="scard small">
-            <div class="scard-label">RE-CHECK</div>
-            <label class="ys-num"><input type="number" min="1" max="60" bind:value={config.recheck_interval_minutes} /><span>min</span></label>
           </div>
         </div>
 
@@ -165,14 +181,6 @@
             <label class="ys-num"><input type="number" min="5" max="60" bind:value={config.tailscale_timeout} disabled={!config.tailscale_enabled} /><span>s</span></label>
           </div>
         </div>
-
-        <div class="scard row">
-          <div class="block">
-            <div class="scard-title">Vertical tabs on the left</div>
-            <div class="scard-desc">Better for small screens</div>
-          </div>
-          <ToggleSwitch bind:checked={config.vertical_update_tabs} accent="cyan" />
-        </div>
       {/if}
     </div>
 
@@ -203,7 +211,6 @@
   .scard-desc { font-family: var(--font-body); font-size: 12px; color: var(--ys-text-muted); margin-top: 2px; }
   .scard-label { font-family: var(--font-mono); font-weight: 600; font-size: 11px; letter-spacing: 1.5px; color: var(--ys-text-dim); }
 
-  .grid3 { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; }
   .grid2 { display: grid; grid-template-columns: repeat(2, 1fr); gap: 12px; }
   .scard.small .scard-label { margin-bottom: 8px; }
   .ys-select.compact { width: auto; min-width: 120px; }

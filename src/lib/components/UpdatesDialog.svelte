@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount } from "svelte";
+  import { onMount, onDestroy } from "svelte";
   import { listen } from "@tauri-apps/api/event";
   import type { CheckResult, HostResult, UpdateInfo } from "../types";
   import {
@@ -11,7 +11,6 @@
     runLocalUpdatePackages,
     runRemoteUpdatePackages,
     runUpdateSelected,
-    startCheck,
   } from "../ipc";
   import UpdateCard from "./UpdateCard.svelte";
   import Reticle from "./Reticle.svelte";
@@ -203,7 +202,11 @@
     }
 
     await loadResults();
-    const offs = await Promise.all([
+    // Register the scan-progress listeners. onMount's async return value is a
+    // Promise, which Svelte ignores for cleanup, so the unlisteners are torn
+    // down from onDestroy below instead — otherwise every reopen leaks 5
+    // handlers that keep firing into destroyed instances.
+    unlisteners = await Promise.all([
       listen<{ hosts: { key: string; name: string }[] }>("check-started", (e) =>
         beginChecking(e.payload.hosts),
       ),
@@ -227,8 +230,10 @@
         loadResults();
       }),
     ]);
-    return () => offs.forEach((un) => un());
   });
+
+  let unlisteners: Array<() => void> = [];
+  onDestroy(() => unlisteners.forEach((un) => un()));
 
   async function loadResults() {
     loading = true;
@@ -256,7 +261,17 @@
   }
 
   function toggleSelectAll() {
-    selectedByHost[activeKey] = allSelected ? [] : [...visiblePkgs];
+    // Only add/remove the packages currently visible under the search filter —
+    // selections of filtered-out packages must survive so "Update Selected"
+    // acts on the full set the user built, not just what's on screen.
+    const cur = selectedByHost[activeKey] ?? [];
+    if (allSelected) {
+      selectedByHost[activeKey] = cur.filter((p) => !visiblePkgs.includes(p));
+    } else {
+      const set = new Set(cur);
+      for (const p of visiblePkgs) set.add(p);
+      selectedByHost[activeKey] = [...set];
+    }
   }
 
   function handleRemove(pkg: string, flags: string) {
@@ -468,7 +483,15 @@
   <DependencyTree packageName={showDeps.pkg} reverse={showDeps.reverse} repository={showDeps.repo} hostname={showDeps.host} onclose={() => (showDeps = null)} />
 {/if}
 
-<svelte:window onkeydown={(e) => e.key === "Escape" && onclose()} />
+<svelte:window
+  onkeydown={(e) => {
+    if (e.key !== "Escape") return;
+    // Dismiss the dependency-tree overlay first if it's open, rather than
+    // hiding the whole window out from under it.
+    if (showDeps) showDeps = null;
+    else onclose();
+  }}
+/>
 
 <style>
   .dialog {

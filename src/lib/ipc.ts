@@ -9,10 +9,6 @@ export async function saveConfig(config: AppConfig): Promise<void> {
   return invoke("save_config", { config });
 }
 
-export async function startCheck(): Promise<void> {
-  return invoke("start_check");
-}
-
 export async function getCheckResult(): Promise<FullCheckResult | null> {
   return invoke("get_check_result");
 }

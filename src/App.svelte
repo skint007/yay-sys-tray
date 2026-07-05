@@ -73,15 +73,17 @@
     window.matchMedia("(prefers-color-scheme: dark)").addEventListener("change", applyTheme);
 
     const win = getCurrentWindow();
-    try {
-      scaleFactor = await win.scaleFactor();
-    } catch {}
     // Remember manual resizes per view (ignore the resizes we trigger ourselves).
-    win.onResized(({ payload }) => {
+    // Read the scale factor fresh each time — it changes when the window moves
+    // between monitors of different DPI, and a stale factor would persist a
+    // wrong (e.g. doubled) logical size.
+    win.onResized(async ({ payload }) => {
       if (suppressSave || !currentView) return;
+      let sf = scaleFactor;
+      try { sf = await win.scaleFactor(); } catch {}
       sizes[currentView] = [
-        Math.round(payload.width / scaleFactor),
-        Math.round(payload.height / scaleFactor),
+        Math.round(payload.width / sf),
+        Math.round(payload.height / sf),
       ];
       try {
         localStorage.setItem(SIZE_KEY, JSON.stringify(sizes));

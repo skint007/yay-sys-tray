@@ -43,14 +43,12 @@ export interface AppConfig {
   autostart: boolean;
   animations: boolean;
   theme: string;
-  recheck_interval_minutes: number;
   passwordless_updates: boolean;
   restart_delay_seconds: number;
   tailscale_enabled: boolean;
   tailscale_tags: string;
   tailscale_timeout: number;
   tailscale_ssh_user: string;
-  vertical_update_tabs: boolean;
   scheduled_check_enabled: boolean;
   scheduled_check_day: number;
   scheduled_check_time: string;

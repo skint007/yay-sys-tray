@@ -75,7 +75,9 @@ pub async fn get_check_result(
 ) -> Result<Option<FullCheckResult>, String> {
     let local = tray_state.local_result.read().await.clone();
     let remote = tray_state.remote_results.read().await.clone();
-    if local.is_none() {
+    // Surface results if either side has data — a failed local check must not
+    // hide successfully-scanned remote hosts (the frontend handles a null local).
+    if local.is_none() && remote.is_empty() {
         return Ok(None);
     }
     Ok(Some(FullCheckResult { local, remote }))
