@@ -14,7 +14,9 @@ const mkUpdates = () => [
   { package: "android-tools", old_version: "35.0.2-27", new_version: "35.0.2-28", description: "Android platform tools", repository: "extra", url: "" },
   { package: "grpc", old_version: "1.81.0-1", new_version: "1.81.1-1", description: "", repository: "extra", url: "" },
   { package: "lib32-systemd", old_version: "260.2-1", new_version: "261-1", description: "", repository: "multilib", url: "" },
+  { package: "yt-transcript", old_version: "0.3.1-1", new_version: "0.4.0-1", description: "YouTube transcript fetcher", repository: "paw", url: "" },
   { package: "kitinerary", old_version: "26.04.2-3", new_version: "26.04.2-4", description: "itinerary extractor", repository: "aur", url: "https://aur.archlinux.org" },
+  { package: "mystery-tool", old_version: "1.0-1", new_version: "1.1-1", description: "package with unknown repo", repository: "", url: "" },
 ];
 
 const config = {

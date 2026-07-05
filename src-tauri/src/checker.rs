@@ -213,8 +213,26 @@ pub fn parse_si_repositories(stdout: &str) -> HashMap<String, (String, String)> 
     repos
 }
 
-/// Build the archlinux.org package page URL for a repo package.
+/// Repos hosted on archlinux.org — only these get a package page URL. Packages
+/// from custom/self-hosted repos (e.g. a personal pacman repo) have no
+/// archlinux.org page, so linking there would 404.
+static OFFICIAL_REPOS: &[&str] = &[
+    "core",
+    "extra",
+    "multilib",
+    "core-testing",
+    "extra-testing",
+    "multilib-testing",
+    "kde-unstable",
+    "gnome-unstable",
+];
+
+/// Build the archlinux.org package page URL for an official repo package, or
+/// an empty string for custom-repo packages (the UI hides the link).
 pub fn package_url(repo: &str, arch: &str, package: &str) -> String {
+    if !OFFICIAL_REPOS.contains(&repo) {
+        return String::new();
+    }
     format!("https://archlinux.org/packages/{repo}/{arch}/{package}/")
 }
 
@@ -426,6 +444,17 @@ mod tests {
         // Running kernel unknown → any recognized kernel package is conservative.
         assert!(package_requires_restart("linux-zen", None));
         assert!(!package_requires_restart("firefox", None));
+    }
+
+    #[test]
+    fn package_url_only_for_official_repos() {
+        assert_eq!(
+            package_url("extra", "x86_64", "firefox"),
+            "https://archlinux.org/packages/extra/x86_64/firefox/"
+        );
+        // Custom repos (e.g. a personal pacman repo) have no archlinux.org
+        // page — the URL must stay empty so the UI hides the link.
+        assert_eq!(package_url("paw", "x86_64", "some-tool"), "");
     }
 
     #[test]
