@@ -65,6 +65,16 @@ fn looks_like_version(s: &str) -> bool {
     s.contains('-') && s.chars().any(|c| c.is_ascii_digit())
 }
 
+/// Valid pacman/AUR package names use only `[A-Za-z0-9@._+-]` (per libalpm), so
+/// any token with other characters isn't a real package. Rejecting it here is
+/// what keeps shell metacharacters out of the `yay -S`/`pacman -S` command
+/// strings built downstream (some of which run through `bash -c`/ssh shells).
+fn looks_like_package_name(s: &str) -> bool {
+    !s.is_empty()
+        && s.chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '@' | '.' | '_' | '+' | '-'))
+}
+
 /// Parse "package old_version -> new_version" lines into UpdateInfo list.
 /// The arrow is located by search rather than fixed position so annotations
 /// around the versions — e.g. the time-since-release marker yay 13+ appends
@@ -81,6 +91,9 @@ pub fn parse_update_output(output: &str) -> Vec<UpdateInfo> {
             let old_version = parts[arrow - 1];
             let new_version = parts[arrow + 1];
             if !looks_like_version(old_version) || !looks_like_version(new_version) {
+                return None;
+            }
+            if !looks_like_package_name(parts[0]) {
                 return None;
             }
             Some(UpdateInfo {
@@ -340,6 +353,14 @@ mod tests {
         // ≥5-token noise shaped "word word -> word junk" must not become an
         // update — fake package names would reach shell commands downstream.
         let out = "warning: database -> outdated (run pacman -Sy)\nfoo bar -> baz qux\n";
+        assert!(parse_update_output(out).is_empty());
+    }
+
+    #[test]
+    fn rejects_package_names_with_shell_metacharacters() {
+        // A name carrying shell metacharacters must never become an update —
+        // it would otherwise flow unquoted into `yay -S`/`pacman -S` shells.
+        let out = "openssl;reboot 1.0-1 -> 1.1-1\n$(id) 1.0-1 -> 1.1-1\na`b` 1.0-1 -> 1.1-1\n";
         assert!(parse_update_output(out).is_empty());
     }
 }

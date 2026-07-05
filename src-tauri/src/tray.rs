@@ -202,10 +202,17 @@ pub fn start_periodic_check(app_handle: tauri::AppHandle) {
 
             if interval_enabled {
                 let last = *app_handle.state::<TrayState>().last_check.read().await;
-                if let Some(last) = last {
-                    if now - last >= chrono::Duration::minutes(interval_min as i64) {
-                        fire = true;
+                match last {
+                    Some(last) => {
+                        if now - last >= chrono::Duration::minutes(interval_min as i64) {
+                            fire = true;
+                        }
                     }
+                    // No successful check has ever landed (e.g. the startup check
+                    // errored transiently), so `last_check` is still None. Retry
+                    // each tick until one succeeds instead of sitting on the
+                    // error icon forever.
+                    None => fire = true,
                 }
             }
 
@@ -350,6 +357,11 @@ pub async fn start_check(app_handle: tauri::AppHandle) {
         }
         Err(err) => {
             log::error!("Update check failed: {err}");
+            // The remote scan already completed before the local check was
+            // evaluated — keep its results so the Updates window can still show
+            // remote hosts even though the local check errored.
+            *tray_state.remote_results.write().await = remote_hosts.clone();
+            *tray_state.last_check.write().await = Some(chrono::Local::now());
             let _ = app_handle.emit("check-error", &err);
             update_tray_error(&app_handle);
         }
@@ -368,7 +380,14 @@ async fn handle_update_finished(app_handle: tauri::AppHandle, scope: String) {
             let result = tray_state.local_result.read().await;
             result
                 .as_ref()
-                .map(|r| r.updates.iter().any(|u| u.package == "yay-sys-tray-git"))
+                .map(|r| {
+                    r.updates.iter().any(|u| {
+                        matches!(
+                            u.package.as_str(),
+                            "yay-sys-tray-git" | "yay-sys-tray-bin" | "yay-sys-tray"
+                        )
+                    })
+                })
                 .unwrap_or(false)
         };
         if self_update {
@@ -555,28 +574,22 @@ async fn update_tray_state(
     let tray_state = app_handle.state::<TrayState>();
     tray_state.reset_bounce();
 
-    if total_count == 0 && reboot_needed {
-        let icon = icons::create_reboot_icon();
-        if animations {
-            start_bounce_animation(app_handle.clone(), icon, 1000, 16);
-        } else {
-            let _ = tray.set_icon(Some(icons::create_reboot_icon()));
-        }
-    } else if total_count == 0 {
+    if total_count == 0 && !reboot_needed {
         let _ = tray.set_icon(Some(icons::create_ok_icon()));
-    } else if any_restart {
-        let icon = icons::create_restart_icon(total_count);
-        if animations {
-            start_bounce_animation(app_handle.clone(), icon, 500, 10);
-        } else {
-            let _ = tray.set_icon(Some(icons::create_restart_icon(total_count)));
-        }
     } else {
-        let icon = icons::create_updates_icon(total_count);
-        if animations {
-            start_bounce_animation(app_handle.clone(), icon, 500, 10);
+        // Pick the icon and its bounce timing once, then either animate it or set
+        // it statically — no rebuilding the same icon in both branches.
+        let (icon, interval_ms, max_ticks) = if total_count == 0 {
+            (icons::create_reboot_icon(), 1000, 16)
+        } else if any_restart {
+            (icons::create_restart_icon(total_count), 500, 10)
         } else {
-            let _ = tray.set_icon(Some(icons::create_updates_icon(total_count)));
+            (icons::create_updates_icon(total_count), 500, 10)
+        };
+        if animations {
+            start_bounce_animation(app_handle.clone(), icon, interval_ms, max_ticks);
+        } else {
+            let _ = tray.set_icon(Some(icon));
         }
     }
 }

@@ -46,11 +46,19 @@
     return "var(--ys-text-muted)";
   }
 
+  let reqId = 0;
   $effect(() => {
+    // Latest-wins: toggling direction fires a new request; ignore any earlier
+    // (possibly slower, e.g. over SSH) response so it can't overwrite the tree
+    // for the direction currently selected.
+    const pkg = packageName;
+    const d = dir;
+    const host = hostname;
+    const my = ++reqId;
     loading = true;
-    getPactree(packageName, dir, hostname ?? undefined)
-      .then((r) => { tree = r; loading = false; })
-      .catch(() => { tree = "Failed to load dependency tree"; loading = false; });
+    getPactree(pkg, d, host ?? undefined)
+      .then((r) => { if (my === reqId) { tree = r; loading = false; } })
+      .catch(() => { if (my === reqId) { tree = "Failed to load dependency tree"; loading = false; } });
   });
 </script>
 

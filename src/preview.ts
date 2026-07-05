@@ -20,9 +20,9 @@ const mkUpdates = () => [
 const config = {
   check_interval_enabled: true, check_interval_minutes: 60, notify: "never", terminal: "kitty",
   noconfirm: true, hold_terminal: true, autostart: true, animations: true, theme: "dark",
-  recheck_interval_minutes: 5, passwordless_updates: true, restart_delay_seconds: 30,
+  passwordless_updates: true, restart_delay_seconds: 30,
   tailscale_enabled: true, tailscale_tags: "arch,linux,server", tailscale_timeout: 10,
-  tailscale_ssh_user: "skint007", vertical_update_tabs: true,
+  tailscale_ssh_user: "skint007",
   scheduled_check_enabled: true, scheduled_check_day: 4, scheduled_check_time: "18:00",
 };
 

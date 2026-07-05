@@ -1,21 +1,24 @@
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock};
 use tauri::image::Image;
 
 const SIZE: u32 = 64;
 
-/// Lazily-initialized font database with system fonts loaded.
-fn fontdb() -> &'static resvg::usvg::fontdb::Database {
-    static DB: OnceLock<resvg::usvg::fontdb::Database> = OnceLock::new();
+/// Lazily-initialized font database with system fonts loaded, kept behind an
+/// `Arc` so each render cheaply clones the handle instead of deep-copying the
+/// whole (tens-of-MB) system font database on every tray icon render.
+fn fontdb() -> Arc<resvg::usvg::fontdb::Database> {
+    static DB: OnceLock<Arc<resvg::usvg::fontdb::Database>> = OnceLock::new();
     DB.get_or_init(|| {
         let mut db = resvg::usvg::fontdb::Database::new();
         db.load_system_fonts();
-        db
+        Arc::new(db)
     })
+    .clone()
 }
 
 fn render_svg(svg: &str) -> Image<'static> {
     let mut opt = resvg::usvg::Options::default();
-    opt.fontdb = std::sync::Arc::new(fontdb().clone());
+    opt.fontdb = fontdb();
     let tree = resvg::usvg::Tree::from_str(svg, &opt).expect("Failed to parse SVG");
     let size = tree.size();
     let mut pixmap =

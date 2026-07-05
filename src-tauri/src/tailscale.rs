@@ -187,41 +187,55 @@ async fn check_host(hostname: &str, timeout: u32, ssh_user: &str) -> HostResult 
     };
 
     match ssh_run(&target, "checkupdates", timeout).await {
-        Ok(output) => {
-            // checkupdates: exit 0 = updates, exit 2 = no updates
-            if output.status.success() {
+        // checkupdates exit codes: 0 = updates available, 2 = no updates, and
+        // anything else is a real failure (1 = checkupdates error, 255 = ssh
+        // could not connect/authenticate). Mirror the local checker's handling
+        // so a dead or misconfigured host reports an error rather than silently
+        // showing as "up to date".
+        Ok(output) => match output.status.code() {
+            Some(0) => {
                 let stdout = String::from_utf8_lossy(&output.stdout);
-                if !stdout.trim().is_empty() {
-                    let mut updates = parse_update_output(&stdout);
-                    let running_pkg = remote_kernel_package(&target, &updates, timeout).await;
+                if stdout.trim().is_empty() {
+                    return empty(None);
+                }
+                let mut updates = parse_update_output(&stdout);
+                let running_pkg = remote_kernel_package(&target, &updates, timeout).await;
 
-                    // Enrich with source repo + package URL (checkupdates omits these).
-                    let pkg_names: Vec<String> =
-                        updates.iter().map(|u| u.package.clone()).collect();
-                    let repos = remote_repositories(&target, &pkg_names, timeout).await;
-                    for u in &mut updates {
-                        if let Some((repo, arch)) = repos.get(&u.package) {
-                            u.repository = repo.clone();
-                            u.url = package_url(repo, arch, &u.package);
-                        }
+                // Enrich with source repo + package URL (checkupdates omits these).
+                let pkg_names: Vec<String> = updates.iter().map(|u| u.package.clone()).collect();
+                let repos = remote_repositories(&target, &pkg_names, timeout).await;
+                for u in &mut updates {
+                    if let Some((repo, arch)) = repos.get(&u.package) {
+                        u.repository = repo.clone();
+                        u.url = package_url(repo, arch, &u.package);
                     }
+                }
 
-                    let restart_pkgs: Vec<String> = updates
-                        .iter()
-                        .filter(|u| package_requires_restart(&u.package, running_pkg.as_deref()))
-                        .map(|u| u.package.clone())
-                        .collect();
-                    return HostResult {
-                        hostname: hostname.to_string(),
-                        needs_restart: !restart_pkgs.is_empty(),
-                        restart_packages: restart_pkgs,
-                        updates,
-                        error: None,
-                    };
+                let restart_pkgs: Vec<String> = updates
+                    .iter()
+                    .filter(|u| package_requires_restart(&u.package, running_pkg.as_deref()))
+                    .map(|u| u.package.clone())
+                    .collect();
+                HostResult {
+                    hostname: hostname.to_string(),
+                    needs_restart: !restart_pkgs.is_empty(),
+                    restart_packages: restart_pkgs,
+                    updates,
+                    error: None,
                 }
             }
-            empty(None)
-        }
+            Some(2) => empty(None),
+            Some(255) => empty(Some("SSH connection failed".to_string())),
+            _ => {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                let msg = stderr.trim();
+                empty(Some(if msg.is_empty() {
+                    "checkupdates failed".to_string()
+                } else {
+                    format!("checkupdates error: {msg}")
+                }))
+            }
+        },
         Err(e) if e.kind() == std::io::ErrorKind::TimedOut => {
             empty(Some("Connection timed out".to_string()))
         }

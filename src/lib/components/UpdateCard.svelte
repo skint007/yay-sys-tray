@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { open as openUrl } from "@tauri-apps/plugin-shell";
   import type { UpdateInfo } from "../types";
   import VersionDiff from "./VersionDiff.svelte";
 
@@ -60,9 +61,9 @@
       <svg viewBox="0 0 24 24"><path d="M12 20V7M6 12l6-6 6 6" /></svg>
     </button>
     {#if update.url}
-      <a class="icon web" href={update.url} target="_blank" rel="noopener" title="Open package page" aria-label="Open package page">
+      <button class="icon web" onclick={() => openUrl(update.url).catch((e) => console.error(e))} title="Open package page" aria-label="Open package page">
         <svg viewBox="0 0 24 24"><path d="M8 16L16 8M9 8h7v7" /></svg>
-      </a>
+      </button>
     {/if}
     {#if update.description}
       <span class="icon info-i" title={update.description} aria-label="Info">

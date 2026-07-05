@@ -27,8 +27,6 @@ pub struct AppConfig {
     pub autostart: bool,
     #[serde(default = "default_true")]
     pub animations: bool,
-    #[serde(default = "default_recheck")]
-    pub recheck_interval_minutes: u32,
     #[serde(default)]
     pub passwordless_updates: bool,
     #[serde(default)]
@@ -44,8 +42,6 @@ pub struct AppConfig {
     #[serde(default)]
     pub tailscale_ssh_user: String,
     #[serde(default)]
-    pub vertical_update_tabs: bool,
-    #[serde(default)]
     pub scheduled_check_enabled: bool,
     #[serde(default = "default_sched_day")]
     pub scheduled_check_day: u32,
@@ -56,7 +52,6 @@ pub struct AppConfig {
 fn default_interval() -> u32 { 60 }
 fn default_notify() -> String { "new_only".into() }
 fn default_true() -> bool { true }
-fn default_recheck() -> u32 { 5 }
 fn default_theme() -> String { "default".into() }
 fn default_tags() -> String { "server,arch".into() }
 fn default_timeout() -> u32 { 10 }
@@ -75,14 +70,12 @@ impl Default for AppConfig {
             autostart: false,
             animations: true,
             theme: "default".into(),
-            recheck_interval_minutes: 5,
             passwordless_updates: false,
             restart_delay_seconds: 0,
             tailscale_enabled: false,
             tailscale_tags: "server,arch".into(),
             tailscale_timeout: 10,
             tailscale_ssh_user: String::new(),
-            vertical_update_tabs: false,
             scheduled_check_enabled: false,
             scheduled_check_day: 5,
             scheduled_check_time: "02:00".into(),
