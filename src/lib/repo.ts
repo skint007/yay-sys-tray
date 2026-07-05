@@ -18,15 +18,23 @@ export const OFFICIAL_REPOS = [
   "gnome-unstable",
 ];
 
-// Sort key for repo groups: official repos lead in the order above; custom
-// repos (e.g. paw) follow alphabetically; AUR is last; "other" (packages with
-// no known repo) sinks below AUR.
+// Sentinel group name for packages whose repo couldn't be determined. Shared
+// with the grouping in UpdatesDialog so the rank below can't desync from it.
+export const UNKNOWN_REPO = "other";
+
+// Rank tiers, derived from the list length so they can never collide with an
+// official repo's index: official repos lead in the order above, then custom
+// repos (e.g. paw, alphabetized by the caller), then AUR, then unknown last.
+const TIER_CUSTOM = OFFICIAL_REPOS.length;
+const TIER_AUR = TIER_CUSTOM + 1;
+const TIER_UNKNOWN = TIER_CUSTOM + 2;
+
 export function repoRank(repo: string): number {
   const i = OFFICIAL_REPOS.indexOf(repo);
   if (i !== -1) return i;
-  if (repo === "aur") return 200;
-  if (repo === "other") return 300;
-  return 100;
+  if (repo === "aur") return TIER_AUR;
+  if (repo === UNKNOWN_REPO) return TIER_UNKNOWN;
+  return TIER_CUSTOM;
 }
 
 // Build the var() reference for a repo's theme color. Repo names may contain

@@ -465,6 +465,24 @@ mod tests {
     }
 
     #[test]
+    fn official_repos_matches_frontend_list() {
+        // OFFICIAL_REPOS is duplicated across the Rust/TS boundary (URL gating
+        // here, UI group ordering in src/lib/repo.ts). Parse the TS source and
+        // compare so the two copies can't silently drift.
+        let ts_path =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../src/lib/repo.ts");
+        let ts = std::fs::read_to_string(&ts_path).expect("read src/lib/repo.ts");
+        let block = ts
+            .split("OFFICIAL_REPOS = [")
+            .nth(1)
+            .and_then(|rest| rest.split(']').next())
+            .expect("OFFICIAL_REPOS array literal in repo.ts");
+        // String literals are every odd-indexed piece when splitting on quotes.
+        let ts_repos: Vec<&str> = block.split('"').skip(1).step_by(2).collect();
+        assert_eq!(ts_repos, OFFICIAL_REPOS);
+    }
+
+    #[test]
     fn maybe_kernel_pkg_excludes_userspace() {
         assert!(maybe_kernel_pkg("linux"));
         assert!(maybe_kernel_pkg("linux-zen"));

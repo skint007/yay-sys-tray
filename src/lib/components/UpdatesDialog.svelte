@@ -12,7 +12,7 @@
     runRemoteUpdatePackages,
     runUpdateSelected,
   } from "../ipc";
-  import { repoRank, repoColorVar } from "../repo";
+  import { repoRank, repoColorVar, UNKNOWN_REPO } from "../repo";
   import UpdateCard from "./UpdateCard.svelte";
   import Reticle from "./Reticle.svelte";
   import DependencyTree from "./DependencyTree.svelte";
@@ -105,32 +105,31 @@
 
   let grouped = $derived.by(() => {
     const h = activeHost;
-    if (!h) return { restart: [] as UpdateInfo[], repos: [] as RepoGroup[] };
+    if (!h) return { restart: [] as UpdateInfo[], repos: [] as RepoGroup[], visible: [] as UpdateInfo[] };
     const q = search.toLowerCase();
     const ups = h.updates.filter((u) => !q || u.package.toLowerCase().includes(q));
     const rset = new Set(h.restartPkgs);
     const byName = (a: UpdateInfo, b: UpdateInfo) => a.package.localeCompare(b.package);
+    const restart: UpdateInfo[] = [];
     const byRepo = new Map<string, UpdateInfo[]>();
     for (const u of ups) {
-      if (rset.has(u.package)) continue;
-      const repo = u.repository || "other";
+      if (rset.has(u.package)) {
+        restart.push(u);
+        continue;
+      }
+      const repo = u.repository || UNKNOWN_REPO;
       const group = byRepo.get(repo);
       if (group) group.push(u);
       else byRepo.set(repo, [u]);
     }
+    restart.sort(byName);
     const repos = [...byRepo.entries()]
       .map(([name, updates]) => ({ name, updates: updates.sort(byName) }))
       .sort((a, b) => repoRank(a.name) - repoRank(b.name) || a.name.localeCompare(b.name));
-    return {
-      restart: ups.filter((u) => rset.has(u.package)).sort(byName),
-      repos,
-    };
+    return { restart, repos, visible: [...restart, ...repos.flatMap((r) => r.updates)] };
   });
 
-  let visiblePkgs = $derived([
-    ...grouped.restart,
-    ...grouped.repos.flatMap((r) => r.updates),
-  ].map((u) => u.package));
+  let visiblePkgs = $derived(grouped.visible.map((u) => u.package));
   let selCount = $derived(activeSelected.length);
   let allSelected = $derived(visiblePkgs.length > 0 && visiblePkgs.every((p) => activeSelected.includes(p)));
   let primaryLabel = $derived.by(() => {
