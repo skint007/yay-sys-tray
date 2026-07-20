@@ -70,9 +70,43 @@ impl TrayState {
     }
 }
 
-/// Set the tray icon under `icon_lock` so concurrent callers can't drive GTK
-/// from two threads at once. A no-op if the tray is gone.
+/// Set the tray icon under `icon_lock`, optionally only if `expected_gen` still
+/// matches the current animation generation. Doing the check and the write while
+/// holding the lock makes them atomic: a superseded animation can never write
+/// after the task that replaced it, and no two threads drive GTK at once.
+///
+/// Returns `true` if this caller is still current (an animation may continue),
+/// `false` if it was superseded (an animation must stop). Unconditional writes
+/// (`expected_gen: None`) always return `true`.
+fn set_tray_icon_checked(
+    app_handle: &tauri::AppHandle,
+    icon: Image<'static>,
+    expected_gen: Option<u64>,
+) -> bool {
+    let tray_state = app_handle.state::<TrayState>();
+    let _guard = tray_state
+        .icon_lock
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    if let Some(expected) = expected_gen {
+        if tray_state.current_anim_generation() != expected {
+            return false;
+        }
+    }
+    if let Some(tray) = get_default_tray(app_handle) {
+        let _ = tray.set_icon(Some(icon));
+    }
+    true
+}
+
+/// Unconditionally set the tray icon under `icon_lock` (non-animation callers).
 fn set_tray_icon(app_handle: &tauri::AppHandle, icon: Image<'static>) {
+    set_tray_icon_checked(app_handle, icon, None);
+}
+
+/// Set the tray tooltip under `icon_lock`, so it can't run concurrently with an
+/// animation's `set_icon` on the same (non-thread-safe) GTK tray.
+fn set_tray_tooltip(app_handle: &tauri::AppHandle, tooltip: &str) {
     let Some(tray) = get_default_tray(app_handle) else {
         return;
     };
@@ -81,7 +115,7 @@ fn set_tray_icon(app_handle: &tauri::AppHandle, icon: Image<'static>) {
         .icon_lock
         .lock()
         .unwrap_or_else(|e| e.into_inner());
-    let _ = tray.set_icon(Some(icon));
+    let _ = tray.set_tooltip(Some(tooltip));
 }
 
 pub fn setup_tray(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
@@ -534,9 +568,9 @@ async fn update_tray_state(
     remote_hosts: &[HostResult],
     animations: bool,
 ) {
-    let Some(tray) = get_default_tray(app_handle) else {
+    if get_default_tray(app_handle).is_none() {
         return;
-    };
+    }
 
     let local_count = result.updates.len() as u32;
     let remote_update_count: u32 = remote_hosts
@@ -596,7 +630,7 @@ async fn update_tray_state(
         lines.push(format!("Last check: {}", time.format("%H:%M")));
     }
 
-    let _ = tray.set_tooltip(Some(&lines.join("\n")));
+    set_tray_tooltip(app_handle, &lines.join("\n"));
 
     // Set icon
     let tray_state = app_handle.state::<TrayState>();
@@ -638,9 +672,7 @@ fn send_notification(app_handle: &tauri::AppHandle, count: u32) {
 fn update_tray_error(app_handle: &tauri::AppHandle) {
     // Stop any running animation so it can't clobber the error icon.
     app_handle.state::<TrayState>().stop_animation();
-    if let Some(tray) = get_default_tray(app_handle) {
-        let _ = tray.set_tooltip(Some("Yay Update Checker\nCheck failed"));
-    }
+    set_tray_tooltip(app_handle, "Yay Update Checker\nCheck failed");
     set_tray_icon(app_handle, icons::create_error_icon());
 }
 
@@ -663,10 +695,11 @@ fn start_spin_animation(app_handle: tauri::AppHandle, enabled: bool) {
     tauri::async_runtime::spawn(async move {
         let mut idx = 0;
         loop {
-            if app_handle.state::<TrayState>().current_anim_generation() != my_gen {
+            // The generation check and the write are atomic under icon_lock, so a
+            // superseded spin can never overwrite a newer static/bounce icon.
+            if !set_tray_icon_checked(&app_handle, frames[idx].clone(), Some(my_gen)) {
                 break;
             }
-            set_tray_icon(&app_handle, frames[idx].clone());
             idx = (idx + 1) % frames.len();
             tokio::time::sleep(std::time::Duration::from_millis(80)).await;
         }
@@ -688,29 +721,28 @@ fn start_bounce_animation(
         let mut tick = 0;
         let mut show_small = false;
 
-        // Set initial full-size icon
-        set_tray_icon(&app_handle, base_icon.clone());
+        // Initial full-size frame. Checked under icon_lock so a bounce whose task
+        // was delayed past a newer refresh can't clobber that newer icon.
+        if !set_tray_icon_checked(&app_handle, base_icon.clone(), Some(my_gen)) {
+            return;
+        }
 
         loop {
-            if app_handle.state::<TrayState>().current_anim_generation() != my_gen {
-                break;
-            }
             if max_ticks > 0 && tick >= max_ticks {
-                // End on full-size
-                set_tray_icon(&app_handle, base_icon.clone());
+                // End on full-size (checked, so we don't overwrite a newer state).
+                set_tray_icon_checked(&app_handle, base_icon.clone(), Some(my_gen));
                 break;
             }
 
             tokio::time::sleep(std::time::Duration::from_millis(interval_ms)).await;
 
-            // Re-check after sleeping: a newer animation may have superseded us
-            // while we slept, and we must not clobber the icon it set.
-            if app_handle.state::<TrayState>().current_anim_generation() != my_gen {
-                break;
-            }
             show_small = !show_small;
             let icon = if show_small { small.clone() } else { base_icon.clone() };
-            set_tray_icon(&app_handle, icon);
+            // Check-and-write is atomic under icon_lock; a superseded bounce stops
+            // here without clobbering the icon set by whatever replaced it.
+            if !set_tray_icon_checked(&app_handle, icon, Some(my_gen)) {
+                break;
+            }
             tick += 1;
         }
     });
