@@ -3,13 +3,15 @@ use crate::icons;
 use crate::tailscale::{self, HostResult};
 use crate::AppState;
 
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Mutex;
 use tauri::image::Image;
 use tauri::{
     menu::{MenuBuilder, MenuItemBuilder},
     tray::TrayIconBuilder,
     Emitter, Listener, Manager,
 };
-use tokio::sync::{watch, RwLock};
+use tokio::sync::RwLock;
 
 /// Shared state for the tray module.
 pub struct TrayState {
@@ -18,49 +20,68 @@ pub struct TrayState {
     pub last_check: RwLock<Option<chrono::DateTime<chrono::Local>>>,
     pub previous_count: RwLock<u32>,
     pub show_updates_item: RwLock<Option<tauri::menu::MenuItem<tauri::Wry>>>,
-    spin_cancel: watch::Sender<bool>,
-    bounce_cancel: watch::Sender<bool>,
+    /// Serializes every check/re-check so their state writes and tray-icon
+    /// updates never interleave. When several update terminals close at once we
+    /// get a burst of `update-finished` events; without this they would run
+    /// concurrent re-checks that mutate the (single-threaded, non-thread-safe)
+    /// GTK tray from multiple worker threads at the same time and crash.
+    refresh_lock: tokio::sync::Mutex<()>,
+    /// Monotonic token identifying the one animation allowed to drive the tray
+    /// icon. Starting an animation bumps it; any older animation loop whose
+    /// captured token no longer matches must stop. This guarantees at most one
+    /// animation task touches the tray, even across overlapping re-checks —
+    /// replacing an earlier `watch`-channel cancel that raced on rapid restart.
+    anim_generation: AtomicU64,
+    /// Guards the actual `set_icon` call so two threads (e.g. a stale animation
+    /// loop that hasn't yet observed a generation bump and the task that
+    /// superseded it) can never call into GTK concurrently.
+    icon_lock: Mutex<()>,
 }
 
 impl TrayState {
     pub fn new() -> Self {
-        let (spin_tx, _) = watch::channel(false);
-        let (bounce_tx, _) = watch::channel(false);
         Self {
             local_result: RwLock::new(None),
             remote_results: RwLock::new(Vec::new()),
             last_check: RwLock::new(None),
             previous_count: RwLock::new(0),
             show_updates_item: RwLock::new(None),
-            spin_cancel: spin_tx,
-            bounce_cancel: bounce_tx,
+            refresh_lock: tokio::sync::Mutex::new(()),
+            anim_generation: AtomicU64::new(0),
+            icon_lock: Mutex::new(()),
         }
     }
 
-    pub fn cancel_spin(&self) {
-        let _ = self.spin_cancel.send(true);
+    /// Bump and return a fresh animation generation, superseding any running
+    /// animation (spin or bounce).
+    fn next_anim_generation(&self) -> u64 {
+        self.anim_generation.fetch_add(1, Ordering::SeqCst) + 1
     }
 
-    pub fn cancel_bounce(&self) {
-        let _ = self.bounce_cancel.send(true);
+    /// The generation of the animation currently allowed to run.
+    fn current_anim_generation(&self) -> u64 {
+        self.anim_generation.load(Ordering::SeqCst)
     }
 
-    pub fn spin_receiver(&self) -> watch::Receiver<bool> {
-        self.spin_cancel.subscribe()
+    /// Stop any running animation without starting a new one (used before
+    /// setting a static icon).
+    fn stop_animation(&self) {
+        self.anim_generation.fetch_add(1, Ordering::SeqCst);
     }
+}
 
-    pub fn bounce_receiver(&self) -> watch::Receiver<bool> {
-        self.bounce_cancel.subscribe()
-    }
-
-    /// Reset the cancel signal so new animations can start.
-    pub fn reset_spin(&self) {
-        let _ = self.spin_cancel.send(false);
-    }
-
-    pub fn reset_bounce(&self) {
-        let _ = self.bounce_cancel.send(false);
-    }
+/// Set the tray icon under `icon_lock` so concurrent callers can't drive GTK
+/// from two threads at once. A no-op if the tray is gone.
+fn set_tray_icon(app_handle: &tauri::AppHandle, icon: Image<'static>) {
+    let Some(tray) = get_default_tray(app_handle) else {
+        return;
+    };
+    let tray_state = app_handle.state::<TrayState>();
+    let _guard = tray_state
+        .icon_lock
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let _ = tray.set_icon(Some(icon));
 }
 
 pub fn setup_tray(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
@@ -241,10 +262,10 @@ pub fn start_periodic_check(app_handle: tauri::AppHandle) {
 pub async fn start_check(app_handle: tauri::AppHandle) {
     log::info!("Starting update check");
 
-    // Start spin animation
-    let tray_state = app_handle.state::<TrayState>();
-    tray_state.cancel_bounce();
-    tray_state.reset_spin();
+    // Serialize with any other in-flight check/re-check so tray mutations and
+    // state writes never overlap. Held for the whole scan.
+    let refresh_state = app_handle.state::<TrayState>();
+    let _refresh_guard = refresh_state.refresh_lock.lock().await;
 
     let (
         animations_enabled,
@@ -325,8 +346,9 @@ pub async fn start_check(app_handle: tauri::AppHandle) {
         Vec::new()
     };
 
-    // Stop spin animation
-    tray_state.cancel_spin();
+    // The spin animation is superseded below: update_tray_state (Ok) and
+    // update_tray_error (Err) each bump the animation generation, which stops it.
+    let tray_state = app_handle.state::<TrayState>();
 
     match result {
         Ok(check_result) => {
@@ -404,6 +426,9 @@ async fn handle_update_finished(app_handle: tauri::AppHandle, scope: String) {
 /// Re-run the local check and refresh the tray, leaving remote results intact.
 async fn recheck_local(app_handle: tauri::AppHandle) {
     log::info!("Re-checking local system after update");
+    // Serialize with concurrent checks/re-checks (a burst of closing terminals).
+    let refresh_state = app_handle.state::<TrayState>();
+    let _refresh_guard = refresh_state.refresh_lock.lock().await;
     let result = checker::check_updates().await;
     let tray_state = app_handle.state::<TrayState>();
     match result {
@@ -425,6 +450,9 @@ async fn recheck_local(app_handle: tauri::AppHandle) {
 /// Re-check a single remote host and refresh, leaving local + other hosts intact.
 async fn recheck_remote(app_handle: tauri::AppHandle, hostname: String) {
     log::info!("Re-checking remote host {hostname} after update");
+    // Serialize with concurrent checks/re-checks (a burst of closing terminals).
+    let refresh_state = app_handle.state::<TrayState>();
+    let _refresh_guard = refresh_state.refresh_lock.lock().await;
     let (timeout, ssh_user) = {
         let state = app_handle.state::<AppState>();
         let config = state.config.read().await;
@@ -572,10 +600,11 @@ async fn update_tray_state(
 
     // Set icon
     let tray_state = app_handle.state::<TrayState>();
-    tray_state.reset_bounce();
 
     if total_count == 0 && !reboot_needed {
-        let _ = tray.set_icon(Some(icons::create_ok_icon()));
+        // Static icon: stop any running animation, then set it (locked).
+        tray_state.stop_animation();
+        set_tray_icon(app_handle, icons::create_ok_icon());
     } else {
         // Pick the icon and its bounce timing once, then either animate it or set
         // it statically — no rebuilding the same icon in both branches.
@@ -587,9 +616,11 @@ async fn update_tray_state(
             (icons::create_updates_icon(total_count), 500, 10)
         };
         if animations {
+            // start_bounce_animation bumps the generation, superseding the spin.
             start_bounce_animation(app_handle.clone(), icon, interval_ms, max_ticks);
         } else {
-            let _ = tray.set_icon(Some(icon));
+            tray_state.stop_animation();
+            set_tray_icon(app_handle, icon);
         }
     }
 }
@@ -605,61 +636,52 @@ fn send_notification(app_handle: &tauri::AppHandle, count: u32) {
 }
 
 fn update_tray_error(app_handle: &tauri::AppHandle) {
+    // Stop any running animation so it can't clobber the error icon.
+    app_handle.state::<TrayState>().stop_animation();
     if let Some(tray) = get_default_tray(app_handle) {
-        let _ = tray.set_icon(Some(icons::create_error_icon()));
         let _ = tray.set_tooltip(Some("Yay Update Checker\nCheck failed"));
     }
+    set_tray_icon(app_handle, icons::create_error_icon());
 }
 
 fn get_default_tray(app_handle: &tauri::AppHandle) -> Option<tauri::tray::TrayIcon> {
     app_handle.tray_by_id("main")
 }
 
-/// Start the spin animation on the tray icon.
+/// Start the spin animation on the tray icon. Bumping the generation supersedes
+/// any earlier animation (spin or bounce), so only this loop drives the icon.
 fn start_spin_animation(app_handle: tauri::AppHandle, enabled: bool) {
     let frames = icons::create_checking_frames(12);
+    let my_gen = app_handle.state::<TrayState>().next_anim_generation();
 
     if !enabled {
         // Just set static checking icon
-        if let Some(tray) = get_default_tray(&app_handle) {
-            let _ = tray.set_icon(Some(frames.into_iter().next().unwrap()));
-        }
+        set_tray_icon(&app_handle, frames.into_iter().next().unwrap());
         return;
     }
-
-    let tray_state = app_handle.state::<TrayState>();
-    let mut cancel_rx = tray_state.spin_receiver();
 
     tauri::async_runtime::spawn(async move {
         let mut idx = 0;
         loop {
-            if let Some(tray) = get_default_tray(&app_handle) {
-                let _ = tray.set_icon(Some(frames[idx].clone()));
+            if app_handle.state::<TrayState>().current_anim_generation() != my_gen {
+                break;
             }
+            set_tray_icon(&app_handle, frames[idx].clone());
             idx = (idx + 1) % frames.len();
-
-            tokio::select! {
-                _ = tokio::time::sleep(std::time::Duration::from_millis(80)) => {},
-                _ = cancel_rx.changed() => {
-                    if *cancel_rx.borrow() {
-                        break;
-                    }
-                }
-            }
+            tokio::time::sleep(std::time::Duration::from_millis(80)).await;
         }
     });
 }
 
-/// Start a bounce animation on the tray icon.
+/// Start a bounce animation on the tray icon. Bumping the generation supersedes
+/// any earlier animation, so only this loop drives the icon.
 fn start_bounce_animation(
     app_handle: tauri::AppHandle,
     base_icon: Image<'static>,
     interval_ms: u64,
     max_ticks: usize,
 ) {
-    let tray_state = app_handle.state::<TrayState>();
-    let mut cancel_rx = tray_state.bounce_receiver();
-
+    let my_gen = app_handle.state::<TrayState>().next_anim_generation();
     let small = icons::create_scaled_icon(&base_icon, 0.65);
 
     tauri::async_runtime::spawn(async move {
@@ -667,36 +689,28 @@ fn start_bounce_animation(
         let mut show_small = false;
 
         // Set initial full-size icon
-        if let Some(tray) = get_default_tray(&app_handle) {
-            let _ = tray.set_icon(Some(base_icon.clone()));
-        }
+        set_tray_icon(&app_handle, base_icon.clone());
 
         loop {
+            if app_handle.state::<TrayState>().current_anim_generation() != my_gen {
+                break;
+            }
             if max_ticks > 0 && tick >= max_ticks {
                 // End on full-size
-                if let Some(tray) = get_default_tray(&app_handle) {
-                    let _ = tray.set_icon(Some(base_icon.clone()));
-                }
+                set_tray_icon(&app_handle, base_icon.clone());
                 break;
             }
 
-            tokio::select! {
-                _ = tokio::time::sleep(std::time::Duration::from_millis(interval_ms)) => {},
-                _ = cancel_rx.changed() => {
-                    if *cancel_rx.borrow() {
-                        break;
-                    }
-                }
-            }
+            tokio::time::sleep(std::time::Duration::from_millis(interval_ms)).await;
 
-            show_small = !show_small;
-            if let Some(tray) = get_default_tray(&app_handle) {
-                if show_small {
-                    let _ = tray.set_icon(Some(small.clone()));
-                } else {
-                    let _ = tray.set_icon(Some(base_icon.clone()));
-                }
+            // Re-check after sleeping: a newer animation may have superseded us
+            // while we slept, and we must not clobber the icon it set.
+            if app_handle.state::<TrayState>().current_anim_generation() != my_gen {
+                break;
             }
+            show_small = !show_small;
+            let icon = if show_small { small.clone() } else { base_icon.clone() };
+            set_tray_icon(&app_handle, icon);
             tick += 1;
         }
     });
