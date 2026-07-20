@@ -98,6 +98,14 @@
 
   let totalCount = $derived(hosts.reduce((s, h) => s + h.updates.length, 0));
   let multiHost = $derived(hosts.length > 1);
+  // Remote hosts carry the bulk-update checkboxes; local updates via the
+  // primary button, so it has no checkbox and is excluded from "select all".
+  let checkableHosts = $derived(hosts.filter((h) => h.checkable));
+  let allHostsChecked = $derived(
+    checkableHosts.length > 0 && checkableHosts.every((h) => checkedHosts.includes(h.key)),
+  );
+  let someHostsChecked = $derived(checkableHosts.some((h) => checkedHosts.includes(h.key)));
+  let hostsIndeterminate = $derived(someHostsChecked && !allHostsChecked);
   let activeHost = $derived(hosts.find((h) => h.key === activeKey) ?? hosts[0]);
   let activeSelected = $derived(selectedByHost[activeKey] ?? []);
 
@@ -132,6 +140,7 @@
   let visiblePkgs = $derived(grouped.visible.map((u) => u.package));
   let selCount = $derived(activeSelected.length);
   let allSelected = $derived(visiblePkgs.length > 0 && visiblePkgs.every((p) => activeSelected.includes(p)));
+  let pkgsIndeterminate = $derived(!allSelected && visiblePkgs.some((p) => activeSelected.includes(p)));
   let primaryLabel = $derived.by(() => {
     if (!activeHost) return "Update";
     const base = selCount > 0 ? "Update Selected" : "Update All";
@@ -271,6 +280,10 @@
       : [...checkedHosts, key];
   }
 
+  function toggleAllHosts() {
+    checkedHosts = allHostsChecked ? [] : checkableHosts.map((h) => h.key);
+  }
+
   function togglePackage(pkg: string) {
     const cur = selectedByHost[activeKey] ?? [];
     selectedByHost[activeKey] = cur.includes(pkg) ? cur.filter((p) => p !== pkg) : [...cur, pkg];
@@ -403,6 +416,19 @@
     <div class="body">
       {#if multiHost}
         <aside class="sidebar">
+          {#if checkableHosts.length > 1}
+            <div class="sidebar-head">
+              <input
+                type="checkbox"
+                class="ys-check sm"
+                checked={allHostsChecked}
+                indeterminate={hostsIndeterminate}
+                onchange={toggleAllHosts}
+                aria-label="Select all hosts"
+              />
+              <span class="sidebar-head-label">All hosts</span>
+            </div>
+          {/if}
           {#each hosts as h (h.key)}
             <button
               class="host"
@@ -466,7 +492,7 @@
 
     <footer class="footer">
       <div class="foot-left">
-        <input type="checkbox" class="ys-check" checked={allSelected} onchange={toggleSelectAll} aria-label="Select all" />
+        <input type="checkbox" class="ys-check" checked={allSelected} indeterminate={pkgsIndeterminate} onchange={toggleSelectAll} aria-label="Select all" />
         <span class="sel-label">{selCount} selected</span>
         <div class="seg">
           <button class:active={density === "roomy"} onclick={() => (density = "roomy")}>Roomy</button>
@@ -572,6 +598,11 @@
   .body { display: flex; gap: 14px; padding: 0 18px; flex: 1; min-height: 0; }
 
   .sidebar { width: 240px; flex: none; overflow-y: auto; display: flex; flex-direction: column; gap: 8px; padding: 2px; }
+  .sidebar-head { display: flex; align-items: center; gap: 9px; padding: 2px 12px 4px; }
+  .sidebar-head-label {
+    font-family: var(--font-mono); font-weight: 600; font-size: 11px;
+    letter-spacing: 1.5px; text-transform: uppercase; color: var(--ys-text-dim);
+  }
   .host {
     display: flex; align-items: center; gap: 9px;
     padding: 10px 11px; border-radius: 10px;
@@ -740,10 +771,17 @@
   }
   :global(.ys-check.sm) { width: 16px; height: 16px; }
   :global(.ys-check:hover) { border-color: var(--ys-violet-500); }
-  :global(.ys-check:checked) { background: var(--ys-violet-600); border-color: var(--ys-violet-600); }
+  :global(.ys-check:checked),
+  :global(.ys-check:indeterminate) { background: var(--ys-violet-600); border-color: var(--ys-violet-600); }
   :global(.ys-check:checked::after) {
     content: ""; position: absolute; left: 5px; top: 1.5px;
     width: 5px; height: 9px; border: solid #fff; border-width: 0 2px 2px 0; transform: rotate(45deg);
   }
   :global(.ys-check.sm:checked::after) { left: 4.5px; top: 1px; width: 4.5px; height: 8px; }
+  /* Partial selection — a horizontal bar instead of the tick. */
+  :global(.ys-check:indeterminate::after) {
+    content: ""; position: absolute; left: 4px; top: 7px;
+    width: 8px; height: 0; border-top: 2px solid #fff; border-radius: 1px;
+  }
+  :global(.ys-check.sm:indeterminate::after) { left: 3.5px; top: 6px; width: 7px; }
 </style>
