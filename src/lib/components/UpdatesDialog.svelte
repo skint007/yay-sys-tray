@@ -98,6 +98,9 @@
 
   let totalCount = $derived(hosts.reduce((s, h) => s + h.updates.length, 0));
   let multiHost = $derived(hosts.length > 1);
+  // Any remote host was scanned this run — the Tailscale feature is in play, so
+  // the active device stays worth naming even after the sidebar collapses.
+  let remoteInPlay = $derived(remoteHosts.length > 0);
   // Remote hosts carry the bulk-update checkboxes; local updates via the
   // primary button, so it has no checkbox and is excluded from "select all".
   let checkableHosts = $derived(hosts.filter((h) => h.checkable));
@@ -345,6 +348,11 @@
       <span class="checking-pill">CHECKING…</span>
     {:else}
       <span class="count-pill">{totalCount}</span>
+      {#if !multiHost && remoteInPlay && activeHost}
+        <span class="active-host" class:reboot={activeHost.needsRestart}>
+          <span class="dot"></span>{activeHost.name}
+        </span>
+      {/if}
     {/if}
     <div class="drag-spacer"></div>
     <div class="chrome-actions">
@@ -574,6 +582,17 @@
     border-radius: 9px;
     padding: 1px 9px;
   }
+  /* Names the active device in the header once the sidebar collapses to a
+     single host — otherwise the last remote device is left unlabeled (#12). */
+  .active-host {
+    display: inline-flex; align-items: center; gap: 6px;
+    font-family: var(--font-body); font-weight: 600; font-size: 12px;
+    color: var(--ys-text-muted);
+    max-width: 200px; overflow: hidden; white-space: nowrap; text-overflow: ellipsis;
+  }
+  .active-host .dot { width: 7px; height: 7px; border-radius: 50%; flex: none; background: var(--ys-pending); }
+  .active-host.reboot { color: var(--ys-danger); }
+  .active-host.reboot .dot { background: var(--ys-danger); }
 
   .search { position: relative; padding: 12px 18px 8px; }
   .search-icon {
