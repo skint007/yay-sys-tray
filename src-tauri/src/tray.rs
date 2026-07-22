@@ -6,11 +6,12 @@ use crate::AppState;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 use tauri::image::Image;
+#[cfg(not(target_os = "linux"))]
 use tauri::{
     menu::{MenuBuilder, MenuItemBuilder},
-    tray::TrayIconBuilder,
-    Emitter, Listener, Manager,
+    tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
 };
+use tauri::{Emitter, Listener, Manager};
 use tokio::sync::RwLock;
 
 /// Shared state for the tray module.
@@ -19,7 +20,10 @@ pub struct TrayState {
     pub remote_results: RwLock<Vec<HostResult>>,
     pub last_check: RwLock<Option<chrono::DateTime<chrono::Local>>>,
     pub previous_count: RwLock<u32>,
+    #[cfg(not(target_os = "linux"))]
     pub show_updates_item: RwLock<Option<tauri::menu::MenuItem<tauri::Wry>>>,
+    #[cfg(target_os = "linux")]
+    linux_tray: Mutex<Option<ksni::Handle<LinuxTray>>>,
     /// Serializes every check/re-check so their state writes and tray-icon
     /// updates never interleave. When several update terminals close at once we
     /// get a burst of `update-finished` events; without this they would run
@@ -45,7 +49,10 @@ impl TrayState {
             remote_results: RwLock::new(Vec::new()),
             last_check: RwLock::new(None),
             previous_count: RwLock::new(0),
+            #[cfg(not(target_os = "linux"))]
             show_updates_item: RwLock::new(None),
+            #[cfg(target_os = "linux")]
+            linux_tray: Mutex::new(None),
             refresh_lock: tokio::sync::Mutex::new(()),
             anim_generation: AtomicU64::new(0),
             icon_lock: Mutex::new(()),
@@ -93,6 +100,18 @@ fn set_tray_icon_checked(
             return false;
         }
     }
+    #[cfg(target_os = "linux")]
+    {
+        let handle = tray_state
+            .linux_tray
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        if let Some(handle) = handle {
+            handle.update(|tray| tray.icon = image_to_ksni_icon(&icon));
+        }
+    }
+    #[cfg(not(target_os = "linux"))]
     if let Some(tray) = get_default_tray(app_handle) {
         let _ = tray.set_icon(Some(icon));
     }
@@ -105,21 +124,52 @@ fn set_tray_icon(app_handle: &tauri::AppHandle, icon: Image<'static>) {
 }
 
 /// Set the tray tooltip under `icon_lock`, so it can't run concurrently with an
-/// animation's `set_icon` on the same (non-thread-safe) GTK tray.
+/// animation updating the same platform tray state.
 fn set_tray_tooltip(app_handle: &tauri::AppHandle, tooltip: &str) {
-    let Some(tray) = get_default_tray(app_handle) else {
-        return;
-    };
     let tray_state = app_handle.state::<TrayState>();
     let _guard = tray_state
         .icon_lock
         .lock()
         .unwrap_or_else(|e| e.into_inner());
-    let _ = tray.set_tooltip(Some(tooltip));
+    #[cfg(target_os = "linux")]
+    {
+        let handle = tray_state
+            .linux_tray
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        if let Some(handle) = handle {
+            handle.update(|tray| tray.tooltip = tooltip.to_string());
+        }
+    }
+    #[cfg(not(target_os = "linux"))]
+    if let Some(tray) = get_default_tray(app_handle) {
+        let _ = tray.set_tooltip(Some(tooltip));
+    }
 }
 
 pub fn setup_tray(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
-    // Build tray menu
+    setup_platform_tray(app)?;
+
+    // Re-check only the target whose update terminal just closed (a single
+    // host, or "local") instead of rescanning the whole fleet every time.
+    let handle = app.handle().clone();
+    app.listen("update-finished", move |event| {
+        let scope = serde_json::from_str::<serde_json::Value>(event.payload())
+            .ok()
+            .and_then(|v| v.get("scope").and_then(|s| s.as_str()).map(String::from))
+            .unwrap_or_else(|| "local".to_string());
+        let h = handle.clone();
+        tauri::async_runtime::spawn(async move {
+            handle_update_finished(h, scope).await;
+        });
+    });
+
+    Ok(())
+}
+
+#[cfg(not(target_os = "linux"))]
+fn setup_platform_tray(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     let check_now = MenuItemBuilder::with_id("check_now", "Check Now").build(app)?;
     let show_updates = MenuItemBuilder::with_id("show_updates", "Show Updates")
         .enabled(false)
@@ -146,6 +196,7 @@ pub fn setup_tray(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
         .icon(icon)
         .tooltip("Yay Update Checker\nNo updates checked yet")
         .menu(&menu)
+        .show_menu_on_left_click(false)
         .on_menu_event(move |app_handle, event| match event.id().as_ref() {
             "check_now" => {
                 let handle = app_handle.clone();
@@ -167,10 +218,16 @@ pub fn setup_tray(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
             }
             _ => {}
         })
-        // Note: on Linux the tray uses libappindicator, which delivers no
-        // click events and always shows the menu on any click, so the menu is
-        // the only interaction. We keep it informative instead (see the
-        // dynamic "Show Updates (N)" label in update_tray_state).
+        .on_tray_icon_event(|tray, event| {
+            if let TrayIconEvent::Click {
+                button: MouseButton::Left,
+                button_state: MouseButtonState::Up,
+                ..
+            } = event
+            {
+                dispatch_left_click(tray.app_handle().clone());
+            }
+        })
         .build(app)?;
 
     // Store the show_updates menu item for later enable/disable
@@ -180,21 +237,174 @@ pub fn setup_tray(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
         *item = Some(show_updates);
     }
 
-    // Re-check only the target whose update terminal just closed (a single
-    // host, or "local") instead of rescanning the whole fleet every time.
-    let handle = app.handle().clone();
-    app.listen("update-finished", move |event| {
-        let scope = serde_json::from_str::<serde_json::Value>(event.payload())
-            .ok()
-            .and_then(|v| v.get("scope").and_then(|s| s.as_str()).map(String::from))
-            .unwrap_or_else(|| "local".to_string());
-        let h = handle.clone();
-        tauri::async_runtime::spawn(async move {
-            handle_update_finished(h, scope).await;
-        });
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+struct LinuxTray {
+    app_handle: tauri::AppHandle,
+    icon: ksni::Icon,
+    tooltip: String,
+    update_count: u32,
+}
+
+#[cfg(target_os = "linux")]
+impl ksni::Tray for LinuxTray {
+    fn id(&self) -> String {
+        "yay-sys-tray".to_string()
+    }
+
+    fn title(&self) -> String {
+        "Yay Update Checker".to_string()
+    }
+
+    fn icon_pixmap(&self) -> Vec<ksni::Icon> {
+        vec![self.icon.clone()]
+    }
+
+    fn tool_tip(&self) -> ksni::ToolTip {
+        ksni::ToolTip {
+            icon_pixmap: vec![self.icon.clone()],
+            title: "Yay Update Checker".to_string(),
+            description: self.tooltip.clone(),
+            ..Default::default()
+        }
+    }
+
+    fn activate(&mut self, _x: i32, _y: i32) {
+        dispatch_left_click(self.app_handle.clone());
+    }
+
+    fn menu(&self) -> Vec<ksni::MenuItem<Self>> {
+        use ksni::menu::StandardItem;
+
+        vec![
+            StandardItem {
+                label: "Check Now".to_string(),
+                activate: Box::new(|tray: &mut Self| {
+                    let handle = tray.app_handle.clone();
+                    tauri::async_runtime::spawn(async move {
+                        start_check(handle).await;
+                    });
+                }),
+                ..Default::default()
+            }
+            .into(),
+            StandardItem {
+                label: if self.update_count > 0 {
+                    format!("Show Updates ({})", self.update_count)
+                } else {
+                    "Show Updates".to_string()
+                },
+                enabled: self.update_count > 0,
+                activate: Box::new(|tray: &mut Self| open_window(&tray.app_handle, "updates")),
+                ..Default::default()
+            }
+            .into(),
+            StandardItem {
+                label: "Update System".to_string(),
+                activate: Box::new(|tray: &mut Self| {
+                    let handle = tray.app_handle.clone();
+                    tauri::async_runtime::spawn(async move {
+                        crate::terminal::run_local_update(handle, false).await;
+                    });
+                }),
+                ..Default::default()
+            }
+            .into(),
+            ksni::MenuItem::Separator,
+            StandardItem {
+                label: "Settings".to_string(),
+                activate: Box::new(|tray: &mut Self| open_window(&tray.app_handle, "settings")),
+                ..Default::default()
+            }
+            .into(),
+            StandardItem {
+                label: "About".to_string(),
+                activate: Box::new(|tray: &mut Self| open_window(&tray.app_handle, "about")),
+                ..Default::default()
+            }
+            .into(),
+            ksni::MenuItem::Separator,
+            StandardItem {
+                label: "Quit".to_string(),
+                activate: Box::new(|tray: &mut Self| tray.app_handle.exit(0)),
+                ..Default::default()
+            }
+            .into(),
+        ]
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn setup_platform_tray(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
+    let initial_icon = icons::create_ok_icon();
+    let service = ksni::TrayService::new(LinuxTray {
+        app_handle: app.handle().clone(),
+        icon: image_to_ksni_icon(&initial_icon),
+        tooltip: "No updates checked yet".to_string(),
+        update_count: 0,
+    });
+    let handle = service.handle();
+
+    std::thread::spawn(move || {
+        if let Err(err) = service.run() {
+            log::error!("Linux tray service stopped: {err}");
+        }
     });
 
+    let tray_state = app.state::<TrayState>();
+    *tray_state
+        .linux_tray
+        .lock()
+        .unwrap_or_else(|e| e.into_inner()) = Some(handle);
+
     Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn image_to_ksni_icon(image: &Image<'_>) -> ksni::Icon {
+    let mut argb = Vec::with_capacity(image.rgba().len());
+    for rgba in image.rgba().chunks_exact(4) {
+        argb.extend_from_slice(&[rgba[3], rgba[0], rgba[1], rgba[2]]);
+    }
+    ksni::Icon {
+        width: image.width() as i32,
+        height: image.height() as i32,
+        data: argb,
+    }
+}
+
+fn dispatch_left_click(app_handle: tauri::AppHandle) {
+    tauri::async_runtime::spawn(async move {
+        handle_left_click(app_handle).await;
+    });
+}
+
+async fn handle_left_click(app_handle: tauri::AppHandle) {
+    let last_check = *app_handle.state::<TrayState>().last_check.read().await;
+    let interval_minutes = app_handle
+        .state::<AppState>()
+        .config
+        .read()
+        .await
+        .check_interval_minutes;
+
+    if check_is_fresh(last_check, chrono::Local::now(), interval_minutes) {
+        open_window(&app_handle, "updates");
+    } else {
+        start_check(app_handle).await;
+    }
+}
+
+fn check_is_fresh(
+    last_check: Option<chrono::DateTime<chrono::Local>>,
+    now: chrono::DateTime<chrono::Local>,
+    interval_minutes: u32,
+) -> bool {
+    last_check
+        .map(|last| now - last < chrono::Duration::minutes(interval_minutes as i64))
+        .unwrap_or(false)
 }
 
 /// Show the main window on a given view (updates/settings/about) and focus it.
@@ -544,20 +754,35 @@ async fn refresh_after_recheck(
 }
 
 /// Enable/disable the "Show Updates" menu item and surface the count in its
-/// label (the tray tooltip is a no-op on Linux/libappindicator).
+/// label.
 async fn set_show_updates_label(app_handle: &tauri::AppHandle, total_count: u32) {
-    let item = {
+    #[cfg(target_os = "linux")]
+    {
         let tray_state = app_handle.state::<TrayState>();
-        let guard = tray_state.show_updates_item.read().await;
-        guard.clone()
-    };
-    if let Some(item) = item {
-        let _ = item.set_enabled(total_count > 0);
-        let _ = item.set_text(if total_count > 0 {
-            format!("Show Updates ({total_count})")
-        } else {
-            "Show Updates".to_string()
-        });
+        let handle = tray_state
+            .linux_tray
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        if let Some(handle) = handle {
+            handle.update(|tray| tray.update_count = total_count);
+        }
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let item = {
+            let tray_state = app_handle.state::<TrayState>();
+            let guard = tray_state.show_updates_item.read().await;
+            guard.clone()
+        };
+        if let Some(item) = item {
+            let _ = item.set_enabled(total_count > 0);
+            let _ = item.set_text(if total_count > 0 {
+                format!("Show Updates ({total_count})")
+            } else {
+                "Show Updates".to_string()
+            });
+        }
     }
 }
 
@@ -568,7 +793,7 @@ async fn update_tray_state(
     remote_hosts: &[HostResult],
     animations: bool,
 ) {
-    if get_default_tray(app_handle).is_none() {
+    if !tray_is_available(app_handle) {
         return;
     }
 
@@ -676,6 +901,22 @@ fn update_tray_error(app_handle: &tauri::AppHandle) {
     set_tray_icon(app_handle, icons::create_error_icon());
 }
 
+#[cfg(target_os = "linux")]
+fn tray_is_available(app_handle: &tauri::AppHandle) -> bool {
+    app_handle
+        .state::<TrayState>()
+        .linux_tray
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .is_some()
+}
+
+#[cfg(not(target_os = "linux"))]
+fn tray_is_available(app_handle: &tauri::AppHandle) -> bool {
+    get_default_tray(app_handle).is_some()
+}
+
+#[cfg(not(target_os = "linux"))]
 fn get_default_tray(app_handle: &tauri::AppHandle) -> Option<tauri::tray::TrayIcon> {
     app_handle.tray_by_id("main")
 }
@@ -746,4 +987,44 @@ fn start_bounce_animation(
             tick += 1;
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::check_is_fresh;
+    use chrono::{Duration, Local, TimeZone};
+
+    #[cfg(target_os = "linux")]
+    use super::image_to_ksni_icon;
+    #[cfg(target_os = "linux")]
+    use tauri::image::Image;
+
+    fn now() -> chrono::DateTime<Local> {
+        Local.with_ymd_and_hms(2026, 7, 22, 12, 0, 0).unwrap()
+    }
+
+    #[test]
+    fn no_previous_check_is_stale() {
+        assert!(!check_is_fresh(None, now(), 60));
+    }
+
+    #[test]
+    fn check_inside_interval_is_fresh() {
+        assert!(check_is_fresh(Some(now() - Duration::minutes(59)), now(), 60));
+    }
+
+    #[test]
+    fn check_at_interval_boundary_is_stale() {
+        assert!(!check_is_fresh(Some(now() - Duration::minutes(60)), now(), 60));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn converts_rgba_icon_to_status_notifier_argb() {
+        let image = Image::new_owned(vec![1, 2, 3, 4, 5, 6, 7, 8], 2, 1);
+        let icon = image_to_ksni_icon(&image);
+
+        assert_eq!((icon.width, icon.height), (2, 1));
+        assert_eq!(icon.data, vec![4, 1, 2, 3, 8, 5, 6, 7]);
+    }
 }

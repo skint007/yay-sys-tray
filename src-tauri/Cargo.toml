@@ -1,6 +1,6 @@
 [package]
 name = "yay-sys-tray"
-version = "1.2.0"
+version = "1.3.0"
 description = "Arch Linux system tray update checker"
 authors = ["skint007"]
 license = "MIT"
@@ -28,3 +28,9 @@ dirs = "6"
 which = "7"
 log = "0.4"
 resvg = "0.45"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+# Tauri's libappindicator backend cannot distinguish left and right clicks on
+# Linux. ksni speaks the StatusNotifierItem protocol directly, which exposes
+# left-click activation separately from the context-menu request.
+ksni = "0.2.2"

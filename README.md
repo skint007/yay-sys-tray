@@ -67,6 +67,10 @@ Run directly:
 yay-sys-tray
 ```
 
+Left-click the tray icon to check for updates when the configured interval has
+elapsed. If the latest check is still current, left-click opens the updates
+window. Right-click opens the context menu.
+
 ### Systemd Service (Arch Linux)
 
 Start now and enable on login:
