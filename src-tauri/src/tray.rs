@@ -627,7 +627,10 @@ pub async fn start_check(app_handle: tauri::AppHandle) {
             // evaluated — keep its results so the Updates window can still show
             // remote hosts even though the local check errored.
             *tray_state.remote_results.write().await = remote_hosts.clone();
-            *tray_state.last_check.write().await = Some(chrono::Local::now());
+            // Only successful full checks count as fresh. Clearing this makes a
+            // tray left-click retry immediately and lets the periodic watchdog
+            // retry on its next tick instead of presenting stale/empty results.
+            *tray_state.last_check.write().await = None;
             let _ = app_handle.emit("check-error", &err);
             update_tray_error(&app_handle);
         }
