@@ -3,7 +3,7 @@ use crate::icons;
 use crate::tailscale::{self, HostResult};
 use crate::AppState;
 
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Mutex;
 use tauri::image::Image;
 #[cfg(not(target_os = "linux"))]
@@ -18,7 +18,7 @@ use tokio::sync::RwLock;
 pub struct TrayState {
     pub local_result: RwLock<Option<CheckResult>>,
     pub remote_results: RwLock<Vec<HostResult>>,
-    pub last_check: RwLock<Option<chrono::DateTime<chrono::Local>>>,
+    pub last_full_check: RwLock<Option<chrono::DateTime<chrono::Local>>>,
     pub previous_count: RwLock<u32>,
     #[cfg(not(target_os = "linux"))]
     pub show_updates_item: RwLock<Option<tauri::menu::MenuItem<tauri::Wry>>>,
@@ -30,6 +30,10 @@ pub struct TrayState {
     /// concurrent re-checks that mutate the (single-threaded, non-thread-safe)
     /// GTK tray from multiple worker threads at the same time and crash.
     refresh_lock: tokio::sync::Mutex<()>,
+    /// Rejects duplicate full scans before they can queue on `refresh_lock`.
+    /// Targeted post-update refreshes still serialize through `refresh_lock`,
+    /// but never count as a full scan for the tray click freshness window.
+    full_check_in_progress: AtomicBool,
     /// Monotonic token identifying the one animation allowed to drive the tray
     /// icon. Starting an animation bumps it; any older animation loop whose
     /// captured token no longer matches must stop. This guarantees at most one
@@ -47,13 +51,14 @@ impl TrayState {
         Self {
             local_result: RwLock::new(None),
             remote_results: RwLock::new(Vec::new()),
-            last_check: RwLock::new(None),
+            last_full_check: RwLock::new(None),
             previous_count: RwLock::new(0),
             #[cfg(not(target_os = "linux"))]
             show_updates_item: RwLock::new(None),
             #[cfg(target_os = "linux")]
             linux_tray: Mutex::new(None),
             refresh_lock: tokio::sync::Mutex::new(()),
+            full_check_in_progress: AtomicBool::new(false),
             anim_generation: AtomicU64::new(0),
             icon_lock: Mutex::new(()),
         }
@@ -382,19 +387,13 @@ fn dispatch_left_click(app_handle: tauri::AppHandle) {
 }
 
 async fn handle_left_click(app_handle: tauri::AppHandle) {
-    let last_check = *app_handle.state::<TrayState>().last_check.read().await;
     let interval_minutes = app_handle
         .state::<AppState>()
         .config
         .read()
         .await
         .check_interval_minutes;
-
-    if check_is_fresh(last_check, chrono::Local::now(), interval_minutes) {
-        open_window(&app_handle, "updates");
-    } else {
-        start_check(app_handle).await;
-    }
+    run_full_check(app_handle, Some(interval_minutes)).await;
 }
 
 fn check_is_fresh(
@@ -466,7 +465,11 @@ pub fn start_periodic_check(app_handle: tauri::AppHandle) {
             let mut fire = false;
 
             if interval_enabled {
-                let last = *app_handle.state::<TrayState>().last_check.read().await;
+                let last = *app_handle
+                    .state::<TrayState>()
+                    .last_full_check
+                    .read()
+                    .await;
                 match last {
                     Some(last) => {
                         if now - last >= chrono::Duration::minutes(interval_min as i64) {
@@ -474,7 +477,7 @@ pub fn start_periodic_check(app_handle: tauri::AppHandle) {
                         }
                     }
                     // No successful check has ever landed (e.g. the startup check
-                    // errored transiently), so `last_check` is still None. Retry
+                    // errored transiently), so `last_full_check` is still None. Retry
                     // each tick until one succeeds instead of sitting on the
                     // error icon forever.
                     None => fire = true,
@@ -504,12 +507,38 @@ pub fn start_periodic_check(app_handle: tauri::AppHandle) {
 
 /// Run a check and update the tray state.
 pub async fn start_check(app_handle: tauri::AppHandle) {
-    log::info!("Starting update check");
+    run_full_check(app_handle, None).await;
+}
 
+/// Run a full check, optionally opening the updates window instead when the
+/// latest successful full scan is still inside the supplied freshness window.
+async fn run_full_check(app_handle: tauri::AppHandle, fresh_for_minutes: Option<u32>) {
     // Serialize with any other in-flight check/re-check so tray mutations and
-    // state writes never overlap. Held for the whole scan.
+    // state writes never overlap. Reject duplicate full scans before they can
+    // queue and repeat an expensive fleet scan after the first one finishes.
     let refresh_state = app_handle.state::<TrayState>();
+    if refresh_state
+        .full_check_in_progress
+        .swap(true, Ordering::AcqRel)
+    {
+        log::info!("Skipping duplicate update check already in progress");
+        return;
+    }
+    let _in_progress_guard = FullCheckGuard(&refresh_state.full_check_in_progress);
     let _refresh_guard = refresh_state.refresh_lock.lock().await;
+
+    // Read freshness only after this request owns both guards. A click that was
+    // queued behind another refresh must see the timestamp that refresh wrote,
+    // not the stale value from when the click first arrived.
+    if let Some(interval_minutes) = fresh_for_minutes {
+        let last_check = *refresh_state.last_full_check.read().await;
+        if check_is_fresh(last_check, chrono::Local::now(), interval_minutes) {
+            open_window(&app_handle, "updates");
+            return;
+        }
+    }
+
+    log::info!("Starting update check");
 
     let (
         animations_enabled,
@@ -602,7 +631,7 @@ pub async fn start_check(app_handle: tauri::AppHandle) {
 
             *tray_state.local_result.write().await = Some(check_result.clone());
             *tray_state.remote_results.write().await = remote_hosts.clone();
-            *tray_state.last_check.write().await = Some(chrono::Local::now());
+            *tray_state.last_full_check.write().await = Some(chrono::Local::now());
             *tray_state.previous_count.write().await = total_count;
 
             let _ = app_handle.emit("check-complete", &check_result);
@@ -630,10 +659,18 @@ pub async fn start_check(app_handle: tauri::AppHandle) {
             // Only successful full checks count as fresh. Clearing this makes a
             // tray left-click retry immediately and lets the periodic watchdog
             // retry on its next tick instead of presenting stale/empty results.
-            *tray_state.last_check.write().await = None;
+            *tray_state.last_full_check.write().await = None;
             let _ = app_handle.emit("check-error", &err);
             update_tray_error(&app_handle);
         }
+    }
+}
+
+struct FullCheckGuard<'a>(&'a AtomicBool);
+
+impl Drop for FullCheckGuard<'_> {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::Release);
     }
 }
 
@@ -681,13 +718,13 @@ async fn recheck_local(app_handle: tauri::AppHandle) {
     match result {
         Ok(check_result) => {
             *tray_state.local_result.write().await = Some(check_result.clone());
-            *tray_state.last_check.write().await = Some(chrono::Local::now());
             let remote = tray_state.remote_results.read().await.clone();
             refresh_after_recheck(&app_handle, &check_result, &remote).await;
             let _ = app_handle.emit("check-complete", &check_result);
         }
         Err(err) => {
             log::error!("Local re-check failed: {err}");
+            *tray_state.last_full_check.write().await = None;
             let _ = app_handle.emit("check-error", &err);
             update_tray_error(&app_handle);
         }
@@ -710,9 +747,10 @@ async fn recheck_remote(app_handle: tauri::AppHandle, hostname: String) {
         tailscale::check_hosts(&app_handle, vec![hostname.clone()], timeout, &ssh_user).await;
 
     let tray_state = app_handle.state::<TrayState>();
-    {
+    let recheck_failed = {
         let mut remote = tray_state.remote_results.write().await;
         if let Some(updated) = results.into_iter().next() {
+            let failed = updated.error.is_some();
             match remote.iter_mut().find(|h| h.hostname == hostname) {
                 Some(slot) => *slot = updated,
                 None => {
@@ -720,9 +758,14 @@ async fn recheck_remote(app_handle: tauri::AppHandle, hostname: String) {
                     remote.sort_by(|a, b| a.hostname.cmp(&b.hostname));
                 }
             }
+            failed
+        } else {
+            true
         }
+    };
+    if recheck_failed {
+        *tray_state.last_full_check.write().await = None;
     }
-    *tray_state.last_check.write().await = Some(chrono::Local::now());
 
     let local = tray_state.local_result.read().await.clone();
     let remote = tray_state.remote_results.read().await.clone();
@@ -816,7 +859,7 @@ async fn update_tray_state(
 
     // Build tooltip
     let tray_state = app_handle.state::<TrayState>();
-    let last_check = tray_state.last_check.read().await;
+    let last_check = tray_state.last_full_check.read().await;
     let mut lines = Vec::new();
 
     if !remote_hosts.is_empty() {
