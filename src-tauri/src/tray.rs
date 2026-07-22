@@ -19,6 +19,7 @@ pub struct TrayState {
     pub local_result: RwLock<Option<CheckResult>>,
     pub remote_results: RwLock<Vec<HostResult>>,
     pub last_full_check: RwLock<Option<chrono::DateTime<chrono::Local>>>,
+    last_check_attempt: RwLock<Option<chrono::DateTime<chrono::Local>>>,
     pub previous_count: RwLock<u32>,
     #[cfg(not(target_os = "linux"))]
     pub show_updates_item: RwLock<Option<tauri::menu::MenuItem<tauri::Wry>>>,
@@ -34,6 +35,7 @@ pub struct TrayState {
     /// Targeted post-update refreshes still serialize through `refresh_lock`,
     /// but never count as a full scan for the tray click freshness window.
     full_check_in_progress: AtomicBool,
+    window_open: Mutex<WindowOpenState>,
     /// Monotonic token identifying the one animation allowed to drive the tray
     /// icon. Starting an animation bumps it; any older animation loop whose
     /// captured token no longer matches must stop. This guarantees at most one
@@ -46,12 +48,19 @@ pub struct TrayState {
     icon_lock: Mutex<()>,
 }
 
+#[derive(Default)]
+struct WindowOpenState {
+    frontend_ready: bool,
+    pending_view: Option<String>,
+}
+
 impl TrayState {
     pub fn new() -> Self {
         Self {
             local_result: RwLock::new(None),
             remote_results: RwLock::new(Vec::new()),
             last_full_check: RwLock::new(None),
+            last_check_attempt: RwLock::new(None),
             previous_count: RwLock::new(0),
             #[cfg(not(target_os = "linux"))]
             show_updates_item: RwLock::new(None),
@@ -59,6 +68,7 @@ impl TrayState {
             linux_tray: Mutex::new(None),
             refresh_lock: tokio::sync::Mutex::new(()),
             full_check_in_progress: AtomicBool::new(false),
+            window_open: Mutex::new(WindowOpenState::default()),
             anim_generation: AtomicU64::new(0),
             icon_lock: Mutex::new(()),
         }
@@ -155,6 +165,25 @@ fn set_tray_tooltip(app_handle: &tauri::AppHandle, tooltip: &str) {
 
 pub fn setup_tray(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     setup_platform_tray(app)?;
+
+    // The renderer registers its open-window listener asynchronously. Hold any
+    // startup fallback request until that listener is ready so the window never
+    // appears without a selected view.
+    let handle = app.handle().clone();
+    app.listen("frontend-ready", move |_| {
+        let pending_view = {
+            let tray_state = handle.state::<TrayState>();
+            let mut window_open = tray_state
+                .window_open
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            window_open.frontend_ready = true;
+            window_open.pending_view.take()
+        };
+        if let Some(view) = pending_view {
+            open_window(&handle, &view);
+        }
+    });
 
     // Re-check only the target whose update terminal just closed (a single
     // host, or "local") instead of rescanning the whole fleet every time.
@@ -417,6 +446,18 @@ fn check_is_fresh(
 
 /// Show the main window on a given view (updates/settings/about) and focus it.
 fn open_window(app_handle: &tauri::AppHandle, view: &str) {
+    {
+        let tray_state = app_handle.state::<TrayState>();
+        let mut window_open = tray_state
+            .window_open
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        if !window_open.frontend_ready {
+            window_open.pending_view = Some(view.to_string());
+            return;
+        }
+    }
+
     let _ = app_handle.emit("open-window", serde_json::json!({ "view": view }));
     if let Some(window) = app_handle.get_webview_window("main") {
         let _ = window.show();
@@ -476,7 +517,7 @@ pub fn start_periodic_check(app_handle: tauri::AppHandle) {
             if interval_enabled {
                 let last = *app_handle
                     .state::<TrayState>()
-                    .last_full_check
+                    .last_check_attempt
                     .read()
                     .await;
                 match last {
@@ -485,10 +526,8 @@ pub fn start_periodic_check(app_handle: tauri::AppHandle) {
                             fire = true;
                         }
                     }
-                    // No successful check has ever landed (e.g. the startup check
-                    // errored transiently), so `last_full_check` is still None. Retry
-                    // each tick until one succeeds instead of sitting on the
-                    // error icon forever.
+                    // No full check has started yet. This normally only applies
+                    // before the startup check records its attempt.
                     None => fire = true,
                 }
             }
@@ -531,6 +570,9 @@ async fn run_full_check(app_handle: tauri::AppHandle, fresh_for_minutes: Option<
         .swap(true, Ordering::AcqRel)
     {
         log::info!("Skipping duplicate update check already in progress");
+        if fresh_for_minutes.is_some() {
+            open_window(&app_handle, "updates");
+        }
         return;
     }
     let _in_progress_guard = FullCheckGuard(&refresh_state.full_check_in_progress);
@@ -548,6 +590,7 @@ async fn run_full_check(app_handle: tauri::AppHandle, fresh_for_minutes: Option<
     }
 
     log::info!("Starting update check");
+    *refresh_state.last_check_attempt.write().await = Some(chrono::Local::now());
 
     let (
         animations_enabled,
@@ -872,7 +915,7 @@ async fn update_tray_state(
 
     // Build tooltip
     let tray_state = app_handle.state::<TrayState>();
-    let last_check = tray_state.last_full_check.read().await;
+    let last_check = tray_state.last_check_attempt.read().await;
     let mut lines = Vec::new();
 
     if !remote_hosts.is_empty() {
