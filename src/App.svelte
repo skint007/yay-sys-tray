@@ -1,6 +1,6 @@
 <script lang="ts">
   import "./app.css";
-  import { listen } from "@tauri-apps/api/event";
+  import { emit, listen } from "@tauri-apps/api/event";
   import { getCurrentWindow, LogicalSize } from "@tauri-apps/api/window";
   import { onMount } from "svelte";
   import { quitApp } from "./lib/ipc";
@@ -90,10 +90,11 @@
       } catch {}
     });
 
-    listen<{ view: string }>("open-window", (event) => {
+    await listen<{ view: string }>("open-window", (event) => {
       previousView = currentView;
       currentView = event.payload.view as View;
     });
+    await emit("frontend-ready");
   });
 
   // Navigate to another view in-window (overflow menu), remembering where we
