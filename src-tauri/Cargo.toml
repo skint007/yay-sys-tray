@@ -6,7 +6,7 @@ authors = ["skint007"]
 license = "MIT"
 repository = "https://github.com/skint007/yay-sys-tray"
 edition = "2021"
-rust-version = "1.77.2"
+rust-version = "1.88"
 
 [lib]
 name = "yay_sys_tray_lib"

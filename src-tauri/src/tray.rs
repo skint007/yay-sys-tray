@@ -352,17 +352,26 @@ fn setup_platform_tray(app: &tauri::App) -> Result<(), Box<dyn std::error::Error
     });
     let handle = service.handle();
 
-    std::thread::spawn(move || {
-        if let Err(err) = service.run() {
-            log::error!("Linux tray service stopped: {err}");
-        }
-    });
-
     let tray_state = app.state::<TrayState>();
     *tray_state
         .linux_tray
         .lock()
         .unwrap_or_else(|e| e.into_inner()) = Some(handle);
+
+    let fallback_app = app.handle().clone();
+    std::thread::spawn(move || {
+        if let Err(err) = service.run() {
+            log::error!("Linux tray service stopped: {err}");
+            let tray_state = fallback_app.state::<TrayState>();
+            *tray_state
+                .linux_tray
+                .lock()
+                .unwrap_or_else(|e| e.into_inner()) = None;
+            // The app starts hidden, so expose the main window if D-Bus tray
+            // registration fails or the service later stops unexpectedly.
+            open_window(&fallback_app, "updates");
+        }
+    });
 
     Ok(())
 }
@@ -602,6 +611,7 @@ async fn run_full_check(app_handle: tauri::AppHandle, fresh_for_minutes: Option<
     );
 
     // Run remote checks (each emits its own progress as it completes).
+    let expected_remote_count = remote_hostnames.len();
     let remote_hosts = if !remote_hostnames.is_empty() {
         let hosts = tailscale::check_hosts(
             &app_handle,
@@ -628,10 +638,13 @@ async fn run_full_check(app_handle: tauri::AppHandle, fresh_for_minutes: Option<
             let total_count = check_result.updates.len() as u32
                 + remote_hosts.iter().map(|h| h.updates.len() as u32).sum::<u32>();
             let old_count = *tray_state.previous_count.read().await;
+            let all_remote_checks_succeeded = remote_hosts.len() == expected_remote_count
+                && remote_hosts.iter().all(|host| host.error.is_none());
 
             *tray_state.local_result.write().await = Some(check_result.clone());
             *tray_state.remote_results.write().await = remote_hosts.clone();
-            *tray_state.last_full_check.write().await = Some(chrono::Local::now());
+            *tray_state.last_full_check.write().await = all_remote_checks_succeeded
+                .then(chrono::Local::now);
             *tray_state.previous_count.write().await = total_count;
 
             let _ = app_handle.emit("check-complete", &check_result);
