@@ -151,20 +151,9 @@ pub fn parse_update_output(output: &str) -> Vec<UpdateInfo> {
         .collect()
 }
 
-/// Fetch package descriptions from the local pacman database.
-async fn fetch_descriptions(packages: &[String]) -> HashMap<String, String> {
-    if packages.is_empty() {
-        return HashMap::new();
-    }
-    let mut args = vec!["-Qi"];
-    args.extend(packages.iter().map(|s| s.as_str()));
-
-    let output = match Command::new("pacman").args(&args).output().await {
-        Ok(o) => o,
-        Err(_) => return HashMap::new(),
-    };
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
+/// Parse `pacman -Qi`/`pacman -Si` output into a package -> description map.
+/// Shared by local and remote checks so update cards expose the same metadata.
+pub fn parse_package_descriptions(stdout: &str) -> HashMap<String, String> {
     let mut descriptions = HashMap::new();
     let mut name = String::new();
 
@@ -182,6 +171,22 @@ async fn fetch_descriptions(packages: &[String]) -> HashMap<String, String> {
         }
     }
     descriptions
+}
+
+/// Fetch package descriptions from the local pacman database.
+async fn fetch_descriptions(packages: &[String]) -> HashMap<String, String> {
+    if packages.is_empty() {
+        return HashMap::new();
+    }
+    let mut args = vec!["-Qi"];
+    args.extend(packages.iter().map(|s| s.as_str()));
+
+    let output = match Command::new("pacman").args(&args).output().await {
+        Ok(o) => o,
+        Err(_) => return HashMap::new(),
+    };
+
+    parse_package_descriptions(&String::from_utf8_lossy(&output.stdout))
 }
 
 /// Parse `pacman -Si` output into a map of package -> (repository, architecture).
@@ -397,6 +402,21 @@ mod tests {
         assert_eq!(updates[0].old_version, "29.17.0-1");
         assert_eq!(updates[0].new_version, "29.20.0-1");
         assert_eq!(updates[1].new_version, "1.127.0-1");
+    }
+
+    #[test]
+    fn parses_package_descriptions() {
+        let out = "Name            : linux\n\
+                   Version         : 7.0.13.arch1-1\n\
+                   Description     : The Linux kernel and modules\n\
+                   Architecture    : x86_64\n\n\
+                   Name            : systemd\n\
+                   Version         : 261-1\n\
+                   Description     : System and service manager\n";
+        let descriptions = parse_package_descriptions(out);
+        assert_eq!(descriptions.len(), 2);
+        assert_eq!(descriptions["linux"], "The Linux kernel and modules");
+        assert_eq!(descriptions["systemd"], "System and service manager");
     }
 
     #[test]

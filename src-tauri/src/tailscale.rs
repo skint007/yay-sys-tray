@@ -1,6 +1,6 @@
 use crate::checker::{
     kernel_package_for, maybe_kernel_pkg, package_requires_restart, package_url,
-    parse_si_repositories, parse_update_output, UpdateInfo,
+    parse_package_descriptions, parse_si_repositories, parse_update_output, UpdateInfo,
 };
 use serde::Serialize;
 use std::collections::{HashMap, HashSet};
@@ -186,6 +186,25 @@ async fn remote_repositories(
     }
 }
 
+/// Fetch each remote package's description from its installed package record,
+/// matching the metadata shown for local updates.
+async fn remote_descriptions(
+    target: &str,
+    packages: &[String],
+    timeout: u32,
+) -> HashMap<String, String> {
+    if packages.is_empty() {
+        return HashMap::new();
+    }
+    let command = format!("pacman -Qi {}", packages.join(" "));
+    match ssh_run(target, &command, timeout).await {
+        Ok(out) if out.status.success() => {
+            parse_package_descriptions(&String::from_utf8_lossy(&out.stdout))
+        }
+        _ => HashMap::new(),
+    }
+}
+
 /// SSH into a host and run checkupdates.
 async fn check_host(hostname: &str, timeout: u32, ssh_user: &str) -> HostResult {
     let target = ssh_target(hostname, ssh_user);
@@ -212,13 +231,21 @@ async fn check_host(hostname: &str, timeout: u32, ssh_user: &str) -> HostResult 
                 let mut updates = parse_update_output(&stdout);
                 let running_pkg = remote_kernel_package(&target, &updates, timeout).await;
 
-                // Enrich with source repo + package URL (checkupdates omits these).
+                // Enrich with metadata that checkupdates omits. Run both remote
+                // queries together so descriptions do not add another SSH
+                // round-trip to the critical path.
                 let pkg_names: Vec<String> = updates.iter().map(|u| u.package.clone()).collect();
-                let repos = remote_repositories(&target, &pkg_names, timeout).await;
+                let (repos, descriptions) = tokio::join!(
+                    remote_repositories(&target, &pkg_names, timeout),
+                    remote_descriptions(&target, &pkg_names, timeout),
+                );
                 for u in &mut updates {
                     if let Some((repo, arch)) = repos.get(&u.package) {
                         u.repository = repo.clone();
                         u.url = package_url(repo, arch, &u.package);
+                    }
+                    if let Some(description) = descriptions.get(&u.package) {
+                        u.description = description.clone();
                     }
                 }
 
