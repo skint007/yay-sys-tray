@@ -1,3 +1,4 @@
+mod aur;
 mod checker;
 mod commands;
 mod config;

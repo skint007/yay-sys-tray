@@ -1,6 +1,6 @@
 [package]
 name = "yay-sys-tray"
-version = "1.3.1"
+version = "1.4.0"
 description = "Arch Linux system tray update checker"
 authors = ["skint007"]
 license = "MIT"
@@ -28,6 +28,13 @@ dirs = "6"
 which = "7"
 log = "0.4"
 resvg = "0.45"
+# rustls rather than the default native-TLS so AUR checks don't depend on the
+# system OpenSSL version being ABI-compatible with whatever this was built on.
+reqwest = { version = "0.12", default-features = false, features = [
+  "json",
+  "rustls-tls",
+  "gzip",
+] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 # Tauri's libappindicator backend cannot distinguish left and right clicks on

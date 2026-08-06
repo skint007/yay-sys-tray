@@ -58,6 +58,13 @@ jobs:
       - name: Install frontend dependencies
         run: pnpm install --frozen-lockfile
 
+      - name: Run Rust tests
+        # The AUR check compares versions with a port of libalpm's vercmp, and a
+        # wrong answer there shows as "up to date" rather than as a failure.
+        # These tests are the only thing that catches that.
+        working-directory: src-tauri
+        run: cargo test
+
       - name: Build Tauri app
         run: pnpm tauri build --no-bundle
 

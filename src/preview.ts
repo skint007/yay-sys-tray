@@ -29,7 +29,7 @@ const config = {
 };
 
 const checkResult = {
-  local: { updates: mkUpdates(), needs_restart: true, restart_packages: ["linux", "systemd"], reboot_info: null },
+  local: { updates: mkUpdates(), needs_restart: true, restart_packages: ["linux", "systemd"], reboot_info: null, aur_error: null },
   remote: [
     { hostname: "arch-serv", updates: mkUpdates().slice(0, 4), needs_restart: true, restart_packages: ["linux"], error: null },
     { hostname: "arch-serv-gpu", updates: mkUpdates().slice(2, 5), needs_restart: false, restart_packages: [], error: null },
