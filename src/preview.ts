@@ -29,7 +29,7 @@ const config = {
 };
 
 const checkResult = {
-  local: { updates: mkUpdates(), needs_restart: true, restart_packages: ["linux", "systemd"], reboot_info: null },
+  local: { updates: mkUpdates(), needs_restart: true, restart_packages: ["linux", "systemd"], reboot_info: null, aur_error: null },
   remote: [
     { hostname: "arch-serv", updates: mkUpdates().slice(0, 4), needs_restart: true, restart_packages: ["linux"], error: null },
     { hostname: "arch-serv-gpu", updates: mkUpdates().slice(2, 5), needs_restart: false, restart_packages: [], error: null },
@@ -63,10 +63,27 @@ const checkingSeed = {
   startedSecAgo: 3,
 };
 
+// Surface #7 — the AUR-outage banner, on an otherwise up-to-date system. That
+// combination is the one worth eyeballing: it's where the tray would previously
+// have claimed everything was fine.
+const aurErrorResult = {
+  local: {
+    updates: [],
+    needs_restart: false,
+    restart_packages: [],
+    reboot_info: null,
+    aur_error: "AUR request failed: error sending request for url (https://aur.archlinux.org/rpc/v5/info)",
+  },
+  remote: [],
+};
+
+const params = new URLSearchParams(location.search);
+const view = params.get("view") ?? "updates";
+
 mockIPC((cmd: string) => {
   switch (cmd) {
     case "get_config": return config;
-    case "get_check_result": return checkResult;
+    case "get_check_result": return view === "aurerror" ? aurErrorResult : checkResult;
     case "discover_tailscale_tags":
       return ["admin", "arch", "cloud", "desktop", "dns", "kvm", "laptop", "linux", "mobile", "router", "server", "windows"];
     case "get_version": return "0.10.3";
@@ -77,13 +94,11 @@ mockIPC((cmd: string) => {
   }
 });
 
-const params = new URLSearchParams(location.search);
-const view = params.get("view") ?? "updates";
 document.documentElement.setAttribute("data-theme", `skint007-${params.get("theme") ?? "dark"}`);
 
 const sizes: Record<string, [number, number]> = {
   updates: [920, 620], settings: [560, 690], about: [480, 460], deptree: [720, 560],
-  checking: [920, 620],
+  checking: [920, 620], aurerror: [920, 620],
 };
 const [w, h] = sizes[view] ?? [920, 620];
 const target = document.getElementById("app")!;

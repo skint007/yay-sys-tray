@@ -18,6 +18,9 @@ export interface CheckResult {
   needs_restart: boolean;
   restart_packages: string[];
   reboot_info: RebootInfo | null;
+  /** Set when the AUR could not be reached, so an outage never reads as "no
+   * AUR updates". Repo updates are still present alongside it. */
+  aur_error: string | null;
 }
 
 export interface HostResult {

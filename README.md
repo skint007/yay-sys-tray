@@ -6,7 +6,7 @@ A lightweight system tray application for monitoring package updates on Arch Lin
 
 ### Local (Arch Linux)
 
-- Periodic update checking via `checkupdates` and `yay -Qua`
+- Periodic update checking via `checkupdates` for repo packages and the AUR's RPC API for AUR packages
 - Tray icon with update count badge and restart-required indicator
 - Per-package info cards with version diff highlighting, repository badges, and restart badges
 - One-click "Update Now" launches `yay -Syu` in your terminal

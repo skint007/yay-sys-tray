@@ -99,6 +99,10 @@ pub struct CheckResult {
     pub needs_restart: bool,
     pub restart_packages: Vec<String>,
     pub reboot_info: Option<RebootInfo>,
+    /// Why the AUR half of the check failed, if it did. Repo updates are still
+    /// reported when this is set — the UI shows it as a warning so an
+    /// unreachable AUR never reads as "no AUR updates".
+    pub aur_error: Option<String>,
 }
 
 /// Pacman versions always carry a numeric component and a `-pkgrel` suffix;
@@ -112,16 +116,17 @@ fn looks_like_version(s: &str) -> bool {
 /// any token with other characters isn't a real package. Rejecting it here is
 /// what keeps shell metacharacters out of the `yay -S`/`pacman -S` command
 /// strings built downstream (some of which run through `bash -c`/ssh shells).
-fn looks_like_package_name(s: &str) -> bool {
+pub fn looks_like_package_name(s: &str) -> bool {
     !s.is_empty()
         && s.chars()
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, '@' | '.' | '_' | '+' | '-'))
 }
 
 /// Parse "package old_version -> new_version" lines into UpdateInfo list.
-/// The arrow is located by search rather than fixed position so annotations
-/// around the versions — e.g. the time-since-release marker yay 13+ appends
-/// ("[20h11m]") or pacman's "[ignored]" — don't drop the line.
+/// Used for `checkupdates`, locally and over SSH; AUR packages go through the
+/// `aur` module instead. The arrow is located by search rather than by fixed
+/// position so trailing annotations, such as pacman's "[ignored]", don't drop
+/// the line.
 pub fn parse_update_output(output: &str) -> Vec<UpdateInfo> {
     output
         .lines()
@@ -316,20 +321,20 @@ pub async fn check_updates() -> Result<CheckResult, String> {
         _ => {} // exit 2 = no updates, or signal
     }
 
-    // Check AUR packages separately via yay
-    if let Ok(aur) = Command::new("yay").arg("-Qua").output().await {
-        if aur.status.success() {
-            let stdout = String::from_utf8_lossy(&aur.stdout);
-            if !stdout.trim().is_empty() {
-                let mut aur_packages = parse_update_output(&stdout);
-                for u in &mut aur_packages {
-                    u.repository = "aur".to_string();
-                    u.url = format!("https://aur.archlinux.org/packages/{}", u.package);
-                }
-                updates.extend(aur_packages);
-            }
+    // AUR packages are checked against the AUR's RPC API rather than by
+    // parsing `yay -Qua` — see the `aur` module for why. A failure here is
+    // recorded and surfaced, not swallowed, so the repo updates above still
+    // reach the user while the AUR problem stays visible.
+    let aur_error = match crate::aur::check_aur_updates().await {
+        Ok(aur_packages) => {
+            updates.extend(aur_packages);
+            None
         }
-    }
+        Err(e) => {
+            log::warn!("AUR update check failed: {e}");
+            Some(e)
+        }
+    };
 
     // Fetch descriptions for all packages
     let pkg_names: Vec<String> = updates.iter().map(|u| u.package.clone()).collect();
@@ -375,6 +380,7 @@ pub async fn check_updates() -> Result<CheckResult, String> {
         restart_packages: restart_pkgs,
         updates,
         reboot_info: Some(reboot_info),
+        aur_error,
     })
 }
 
@@ -393,7 +399,7 @@ mod tests {
     }
 
     #[test]
-    fn parses_yay_output_with_time_annotation() {
+    fn parses_lines_with_trailing_annotations() {
         let out = "oh-my-posh-bin 29.17.0-1 -> 29.20.0-1 [20h11m]\n\
                    visual-studio-code-bin 1.125.0-1 -> 1.127.0-1 [2d5h]\n";
         let updates = parse_update_output(out);

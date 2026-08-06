@@ -372,6 +372,16 @@
     </div>
   {/if}
 
+  <!-- Rendered above the results so it shows whether or not any repo updates
+       were found — an AUR outage with an otherwise up-to-date system would
+       otherwise land on the "System is up to date" screen. -->
+  {#if !checking && !loading && localResult?.aur_error}
+    <div class="aur-error" role="status">
+      <span class="aur-error-dot"></span>
+      <span class="aur-error-text">AUR check failed — AUR updates not shown. {localResult.aur_error}</span>
+    </div>
+  {/if}
+
   {#if checking}
     <div class="body checking-body">
       {#if scanTotal > 1}
@@ -593,6 +603,25 @@
   .active-host .dot { width: 7px; height: 7px; border-radius: 50%; flex: none; background: var(--ys-pending); }
   .active-host.reboot { color: var(--ys-danger); }
   .active-host.reboot .dot { background: var(--ys-danger); }
+
+  .aur-error {
+    display: flex; align-items: center; gap: 8px;
+    margin: 0 18px 8px; padding: 8px 12px;
+    border: 1px solid color-mix(in srgb, var(--ys-pending) 45%, transparent);
+    background: color-mix(in srgb, var(--ys-pending) 12%, transparent);
+    border-radius: 11px;
+  }
+  .aur-error-dot {
+    flex: none; width: 6px; height: 6px; border-radius: 50%;
+    background: var(--ys-pending);
+  }
+  /* The dot and border carry the warning color; the text itself stays on the
+     normal text color, which is the only way it clears AA contrast against the
+     tinted background at this size in the light theme. */
+  .aur-error-text {
+    font-family: var(--font-mono); font-size: 11px; line-height: 1.45;
+    color: var(--ys-text);
+  }
 
   .search { position: relative; padding: 12px 18px 8px; }
   .search-icon {
