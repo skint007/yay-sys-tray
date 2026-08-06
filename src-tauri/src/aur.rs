@@ -30,6 +30,9 @@ const RPC_URL: &str = "https://aur.archlinux.org/rpc/v5/info";
 /// under that cap also keeps any one request small enough to retry cheaply.
 const BATCH_SIZE: usize = 200;
 
+/// Bounds each HTTP request, not the check as a whole: chunks are fetched one
+/// after another, so a machine with enough foreign packages to need several
+/// batches can spend a multiple of this before an unreachable AUR gives up.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(20);
 
 /// Subset of the RPC v5 envelope we care about. Unknown fields are ignored, so

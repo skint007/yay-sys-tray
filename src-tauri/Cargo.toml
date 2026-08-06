@@ -30,6 +30,9 @@ log = "0.4"
 resvg = "0.45"
 # rustls rather than the default native-TLS so AUR checks don't depend on the
 # system OpenSSL version being ABI-compatible with whatever this was built on.
+# Note this pulls webpki-roots, so the AUR check trusts a compiled-in root set
+# rather than the system store: behind a TLS-inspecting proxy with a locally
+# installed CA, the check fails with a cert error that reads as an AUR outage.
 reqwest = { version = "0.12", default-features = false, features = [
   "json",
   "rustls-tls",
