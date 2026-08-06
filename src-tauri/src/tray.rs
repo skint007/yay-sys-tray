@@ -686,14 +686,13 @@ async fn run_full_check(app_handle: tauri::AppHandle, fresh_for_minutes: Option<
 
             *tray_state.local_result.write().await = Some(check_result.clone());
             *tray_state.remote_results.write().await = remote_hosts.clone();
-            // A failed AUR half makes the result incomplete even though the
-            // local check returned Ok, so it must not count as a fresh full
-            // check — otherwise the freshness gate suppresses the retry and the
-            // AUR stays unchecked until the next interval.
-            let check_was_complete =
-                all_remote_checks_succeeded && check_result.aur_error.is_none();
-            *tray_state.last_full_check.write().await =
-                check_was_complete.then(chrono::Local::now);
+            // A failed AUR half deliberately still counts as fresh. The
+            // periodic watchdog retries off `last_check_attempt`, so clearing
+            // this would not buy an extra retry — it would only make every tray
+            // left-click re-run the whole fleet scan and open nothing, leaving
+            // the user no way to reach the window that explains the failure.
+            *tray_state.last_full_check.write().await = all_remote_checks_succeeded
+                .then(chrono::Local::now);
             *tray_state.previous_count.write().await = total_count;
 
             let _ = app_handle.emit("check-complete", &check_result);

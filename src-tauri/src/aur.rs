@@ -53,22 +53,23 @@ struct RpcPackage {
 }
 
 /// Split `pacman -Qm` output into (name, installed version) pairs. The format
-/// is exactly two whitespace-separated columns per line; anything else is not a
-/// package record and is dropped rather than guessed at.
-pub fn parse_foreign_packages(stdout: &str) -> Vec<(String, String)> {
+/// is exactly two whitespace-separated columns per line.
+///
+/// Every non-blank line must parse. Skipping the odd unparseable one would drop
+/// that package from the comparison silently, and a package that is never
+/// checked looks exactly like a package that is up to date.
+pub fn parse_foreign_packages(stdout: &str) -> Result<Vec<(String, String)>, String> {
     stdout
         .lines()
-        .filter_map(|line| {
+        .filter(|line| !line.trim().is_empty())
+        .map(|line| {
             let mut parts = line.split_whitespace();
-            let name = parts.next()?;
-            let version = parts.next()?;
-            if parts.next().is_some() {
-                return None;
+            match (parts.next(), parts.next(), parts.next()) {
+                (Some(name), Some(version), None) if looks_like_package_name(name) => {
+                    Ok((name.to_string(), version.to_string()))
+                }
+                _ => Err(format!("unexpected `pacman -Qm` line: {}", line.trim())),
             }
-            if !looks_like_package_name(name) {
-                return None;
-            }
-            Some((name.to_string(), version.to_string()))
         })
         .collect()
 }
@@ -82,39 +83,76 @@ async fn foreign_packages() -> Result<Vec<(String, String)>, String> {
         .await
         .map_err(|e| format!("Failed to run pacman -Qm: {e}"))?;
 
-    interpret_qm_output(
-        output.status.success(),
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    match interpret_qm_output(
+        output.status.code(),
         &String::from_utf8_lossy(&output.stdout),
-        &String::from_utf8_lossy(&output.stderr),
-    )
+    ) {
+        QmOutcome::Packages(packages) => Ok(packages),
+        QmOutcome::Failed(reason) => Err(match stderr.trim() {
+            "" => reason,
+            detail => format!("{reason}: {detail}"),
+        }),
+        // Confirm the empty result before believing it. If pacman can list the
+        // local database at all then it was readable, so "no foreign packages"
+        // is the truth rather than a failure wearing the same exit status.
+        QmOutcome::NoMatches => {
+            if local_db_is_readable().await {
+                Ok(Vec::new())
+            } else {
+                Err(match stderr.trim() {
+                    "" => "pacman could not read the local package database".to_string(),
+                    detail => format!("pacman -Qm failed: {detail}"),
+                })
+            }
+        }
+    }
 }
 
-/// Turn a `pacman -Qm` run into a package list or an error. Split out from the
-/// process call so both rules below are covered by tests.
-fn interpret_qm_output(
-    success: bool,
-    stdout: &str,
-    stderr: &str,
-) -> Result<Vec<(String, String)>, String> {
-    // `pacman -Qm` exits 1 simply because nothing matched, which is the normal
-    // state on a machine with no AUR packages at all. A genuine failure (an
-    // unreadable database, say) also writes to stderr, and that is what tells
-    // the two apart — exit status alone would report healthy systems as broken.
-    if !success && !stderr.trim().is_empty() {
-        return Err(format!("pacman -Qm failed: {}", stderr.trim()));
+/// What a `pacman -Qm` run reported.
+#[derive(Debug, PartialEq)]
+enum QmOutcome {
+    Packages(Vec<(String, String)>),
+    /// Pacman's "nothing matched" exit. On a machine with no AUR packages this
+    /// is the healthy state, but the same status covers some real failures, so
+    /// the caller confirms it before treating it as empty.
+    NoMatches,
+    Failed(String),
+}
+
+/// Classify a `pacman -Qm` run from its exit code and stdout. Split out from
+/// the process call so the rules below are covered by tests.
+///
+/// Deliberately ignores stderr: pacman prints warnings there on perfectly
+/// healthy systems (an un-synced repo, say), so treating output on stderr as
+/// failure would report those machines as broken forever.
+fn interpret_qm_output(exit_code: Option<i32>, stdout: &str) -> QmOutcome {
+    match exit_code {
+        Some(0) => match parse_foreign_packages(stdout) {
+            Ok(packages) => QmOutcome::Packages(packages),
+            Err(reason) => QmOutcome::Failed(reason),
+        },
+        // Exit 1 with nothing on stdout is how pacman says "no matches" — and
+        // also how some failures surface, hence the caller's confirmation step.
+        Some(1) if stdout.trim().is_empty() => QmOutcome::NoMatches,
+        // Any other status is unambiguous. `None` means a signal killed it,
+        // which leaves stderr empty and would otherwise pass as "no packages".
+        Some(code) => QmOutcome::Failed(format!("pacman -Qm exited with status {code}")),
+        None => QmOutcome::Failed("pacman -Qm was killed by a signal".to_string()),
     }
+}
 
-    let packages = parse_foreign_packages(stdout);
-
-    // Output that yielded no records at all means the format moved out from
-    // under us. Say so, rather than returning an empty list that reads as "no
-    // AUR updates" — that silent zero is the exact failure this module exists
-    // to prevent, and it is how the yay-based check broke twice.
-    if packages.is_empty() && !stdout.trim().is_empty() {
-        return Err("pacman -Qm output was not in the expected format".to_string());
-    }
-
-    Ok(packages)
+/// Whether pacman can read the local package database at all. Used to tell a
+/// genuinely empty `-Qm` result apart from a database it couldn't open, which
+/// pacman reports with the same exit status.
+async fn local_db_is_readable() -> bool {
+    Command::new("pacman")
+        .arg("-Qq")
+        .output()
+        .await
+        .map(|out| out.status.success())
+        .unwrap_or(false)
 }
 
 /// Ask the AUR for the current version of each named package. Names the AUR
@@ -421,26 +459,44 @@ mod tests {
     #[test]
     fn parses_foreign_package_list() {
         let out = "ai-memory-bin 1.17.1-1\nclaude-code 2.1.216-1\nyay-bin 13.0.1-1\n";
-        let pkgs = parse_foreign_packages(out);
+        let pkgs = parse_foreign_packages(out).unwrap();
         assert_eq!(pkgs.len(), 3);
         assert_eq!(pkgs[0], ("ai-memory-bin".to_string(), "1.17.1-1".to_string()));
         assert_eq!(pkgs[2], ("yay-bin".to_string(), "13.0.1-1".to_string()));
     }
 
     #[test]
-    fn no_foreign_packages_is_not_an_error() {
+    fn no_matches_is_not_reported_as_failure() {
         // pacman exits 1 when nothing matched. On a machine with no AUR
-        // packages that is the healthy state, not a failure to report.
-        assert_eq!(interpret_qm_output(false, "", ""), Ok(Vec::new()));
+        // packages that is the healthy state, so it must not surface as an
+        // error — the caller confirms it against the local database instead.
+        assert_eq!(interpret_qm_output(Some(1), ""), QmOutcome::NoMatches);
     }
 
     #[test]
-    fn reports_pacman_failures() {
-        let err = interpret_qm_output(false, "", "error: could not open database\n");
+    fn warnings_on_a_healthy_system_are_not_failures() {
+        // pacman warns on stderr about un-synced repos while exiting normally.
+        // Treating stderr as the failure signal would report those machines as
+        // broken forever, so classification ignores it entirely.
+        let out = "ai-memory-bin 1.17.1-1\n";
         assert_eq!(
-            err,
-            Err("pacman -Qm failed: error: could not open database".to_string())
+            interpret_qm_output(Some(0), out),
+            QmOutcome::Packages(vec![("ai-memory-bin".into(), "1.17.1-1".into())])
         );
+    }
+
+    #[test]
+    fn signal_death_is_a_failure_not_an_empty_result() {
+        // A killed pacman leaves no exit code and no stderr. Without this case
+        // it would read as "no AUR packages" — a silent zero.
+        assert!(matches!(
+            interpret_qm_output(None, ""),
+            QmOutcome::Failed(_)
+        ));
+        assert!(matches!(
+            interpret_qm_output(Some(4), ""),
+            QmOutcome::Failed(_)
+        ));
     }
 
     #[test]
@@ -448,14 +504,39 @@ mod tests {
         // If pacman -Qm ever grows a column, the check must say so instead of
         // quietly reporting zero AUR updates.
         let out = "ai-memory-bin 1.17.1-1 [installed as dependency]\n";
-        assert!(interpret_qm_output(true, out, "").is_err());
+        assert!(matches!(
+            interpret_qm_output(Some(0), out),
+            QmOutcome::Failed(_)
+        ));
+    }
+
+    #[test]
+    fn a_single_bad_line_fails_the_whole_read() {
+        // Dropping just the unparseable line would hide that one package from
+        // the comparison, which looks identical to it being up to date.
+        let out = "good-pkg 1.0-1\nweird line here that is wrong\nother-pkg 2.0-1\n";
+        assert!(parse_foreign_packages(out).is_err());
     }
 
     #[test]
     fn rejects_non_package_lines() {
-        // Warnings, blank lines and anything that isn't exactly two columns of
-        // package-shaped text must not become a fake package name.
-        let out = "\nwarning: database file for 'x' does not exist\npkg 1.0-1 extra\n$(rm -rf) 1.0-1\n";
-        assert!(parse_foreign_packages(out).is_empty());
+        // Warnings and anything that isn't two columns of package-shaped text
+        // must never become a fake package name.
+        for out in [
+            "warning: database file for 'x' does not exist\n",
+            "pkg 1.0-1 extra\n",
+            "$(rm -rf) 1.0-1\n",
+        ] {
+            assert!(parse_foreign_packages(out).is_err(), "accepted: {out:?}");
+        }
+    }
+
+    #[test]
+    fn blank_lines_are_ignored() {
+        let out = "\nai-memory-bin 1.17.1-1\n\n";
+        assert_eq!(
+            parse_foreign_packages(out).unwrap(),
+            vec![("ai-memory-bin".to_string(), "1.17.1-1".to_string())]
+        );
     }
 }
