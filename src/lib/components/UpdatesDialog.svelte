@@ -615,9 +615,12 @@
     flex: none; width: 6px; height: 6px; border-radius: 50%;
     background: var(--ys-pending);
   }
+  /* The dot and border carry the warning color; the text itself stays on the
+     normal text color, which is the only way it clears AA contrast against the
+     tinted background at this size in the light theme. */
   .aur-error-text {
     font-family: var(--font-mono); font-size: 11px; line-height: 1.45;
-    color: var(--ys-pending);
+    color: var(--ys-text);
   }
 
   .search { position: relative; padding: 12px 18px 8px; }

@@ -686,8 +686,14 @@ async fn run_full_check(app_handle: tauri::AppHandle, fresh_for_minutes: Option<
 
             *tray_state.local_result.write().await = Some(check_result.clone());
             *tray_state.remote_results.write().await = remote_hosts.clone();
-            *tray_state.last_full_check.write().await = all_remote_checks_succeeded
-                .then(chrono::Local::now);
+            // A failed AUR half makes the result incomplete even though the
+            // local check returned Ok, so it must not count as a fresh full
+            // check — otherwise the freshness gate suppresses the retry and the
+            // AUR stays unchecked until the next interval.
+            let check_was_complete =
+                all_remote_checks_succeeded && check_result.aur_error.is_none();
+            *tray_state.last_full_check.write().await =
+                check_was_complete.then(chrono::Local::now);
             *tray_state.previous_count.write().await = total_count;
 
             let _ = app_handle.emit("check-complete", &check_result);
@@ -912,6 +918,8 @@ async fn update_tray_state(
         .as_ref()
         .map(|r| r.needed)
         .unwrap_or(false);
+    // The count is missing its AUR half, so "up to date" would be a guess.
+    let aur_failed = result.aur_error.is_some();
 
     // Build tooltip
     let tray_state = app_handle.state::<TrayState>();
@@ -942,6 +950,8 @@ async fn update_tray_state(
     } else if total_count == 0 {
         if reboot_needed {
             lines.push("Reboot required".to_string());
+        } else if aur_failed {
+            lines.push("Repos up to date".to_string());
         } else {
             lines.push("System up to date".to_string());
         }
@@ -951,6 +961,13 @@ async fn update_tray_state(
             let pkgs = result.restart_packages.join(", ");
             lines.push(format!("Restart: {pkgs}"));
         }
+    }
+
+    // Stated after the counts, because it qualifies them: whatever number is
+    // above excludes the AUR. Without this the tray reads "System up to date"
+    // during an AUR outage, which is the failure this check was rebuilt to fix.
+    if aur_failed {
+        lines.push("AUR check failed".to_string());
     }
 
     if let Some(time) = *last_check {
@@ -965,7 +982,16 @@ async fn update_tray_state(
     if total_count == 0 && !reboot_needed {
         // Static icon: stop any running animation, then set it (locked).
         tray_state.stop_animation();
-        set_tray_icon(app_handle, icons::create_ok_icon());
+        // The all-clear icon would be a claim the check can't back when the AUR
+        // half failed — the error icon sends the user to the tooltip instead.
+        set_tray_icon(
+            app_handle,
+            if aur_failed {
+                icons::create_error_icon()
+            } else {
+                icons::create_ok_icon()
+            },
+        );
     } else {
         // Pick the icon and its bounce timing once, then either animate it or set
         // it statically — no rebuilding the same icon in both branches.

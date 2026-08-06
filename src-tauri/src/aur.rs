@@ -10,6 +10,12 @@
 //!
 //! yay is still what *installs* updates — that runs in a terminal and needs no
 //! parsing, so it can't break this way.
+//!
+//! Two deliberate differences from `yay -Qua`. VCS packages (`-git`, `-svn`)
+//! are compared on their AUR pkgver, not on upstream commits, so yay's
+//! opt-in `--devel` scan has no equivalent here. And `IgnorePkg` entries are
+//! listed rather than filtered, which matches how `checkupdates` already
+//! reports ignored repo packages, so both halves behave the same way.
 
 use crate::checker::{looks_like_package_name, UpdateInfo};
 use serde::Deserialize;
@@ -76,12 +82,39 @@ async fn foreign_packages() -> Result<Vec<(String, String)>, String> {
         .await
         .map_err(|e| format!("Failed to run pacman -Qm: {e}"))?;
 
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
+    interpret_qm_output(
+        output.status.success(),
+        &String::from_utf8_lossy(&output.stdout),
+        &String::from_utf8_lossy(&output.stderr),
+    )
+}
+
+/// Turn a `pacman -Qm` run into a package list or an error. Split out from the
+/// process call so both rules below are covered by tests.
+fn interpret_qm_output(
+    success: bool,
+    stdout: &str,
+    stderr: &str,
+) -> Result<Vec<(String, String)>, String> {
+    // `pacman -Qm` exits 1 simply because nothing matched, which is the normal
+    // state on a machine with no AUR packages at all. A genuine failure (an
+    // unreadable database, say) also writes to stderr, and that is what tells
+    // the two apart — exit status alone would report healthy systems as broken.
+    if !success && !stderr.trim().is_empty() {
         return Err(format!("pacman -Qm failed: {}", stderr.trim()));
     }
 
-    Ok(parse_foreign_packages(&String::from_utf8_lossy(&output.stdout)))
+    let packages = parse_foreign_packages(stdout);
+
+    // Output that yielded no records at all means the format moved out from
+    // under us. Say so, rather than returning an empty list that reads as "no
+    // AUR updates" — that silent zero is the exact failure this module exists
+    // to prevent, and it is how the yay-based check broke twice.
+    if packages.is_empty() && !stdout.trim().is_empty() {
+        return Err("pacman -Qm output was not in the expected format".to_string());
+    }
+
+    Ok(packages)
 }
 
 /// Ask the AUR for the current version of each named package. Names the AUR
@@ -392,6 +425,30 @@ mod tests {
         assert_eq!(pkgs.len(), 3);
         assert_eq!(pkgs[0], ("ai-memory-bin".to_string(), "1.17.1-1".to_string()));
         assert_eq!(pkgs[2], ("yay-bin".to_string(), "13.0.1-1".to_string()));
+    }
+
+    #[test]
+    fn no_foreign_packages_is_not_an_error() {
+        // pacman exits 1 when nothing matched. On a machine with no AUR
+        // packages that is the healthy state, not a failure to report.
+        assert_eq!(interpret_qm_output(false, "", ""), Ok(Vec::new()));
+    }
+
+    #[test]
+    fn reports_pacman_failures() {
+        let err = interpret_qm_output(false, "", "error: could not open database\n");
+        assert_eq!(
+            err,
+            Err("pacman -Qm failed: error: could not open database".to_string())
+        );
+    }
+
+    #[test]
+    fn unparseable_output_errors_rather_than_reading_as_empty() {
+        // If pacman -Qm ever grows a column, the check must say so instead of
+        // quietly reporting zero AUR updates.
+        let out = "ai-memory-bin 1.17.1-1 [installed as dependency]\n";
+        assert!(interpret_qm_output(true, out, "").is_err());
     }
 
     #[test]
