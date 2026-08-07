@@ -243,16 +243,23 @@ async fn remote_aur_updates(target: &str, timeout: u32) -> Result<Vec<UpdateInfo
         // before believing it.
         QmOutcome::NoMatches => match ssh_run(target, "pacman -Qq", timeout).await {
             Ok(probe) if probe.status.success() => Vec::new(),
+            // ssh reports every connection failure as 255, so this is the
+            // common way the probe misses — not a pacman problem at all.
+            // Blaming the database here would name the wrong cause.
+            Ok(probe) if probe.status.code() == Some(255) => {
+                return Err("SSH connection failed during AUR check".to_string())
+            }
             // The probe reached the host and pacman still couldn't list
             // anything, so the empty result was hiding an unreadable database.
-            Ok(_) => {
-                return Err(match stderr.trim() {
-                    "" => "pacman could not read the package database".to_string(),
-                    detail => format!("pacman -Qm failed: {detail}"),
-                })
+            // Its own stderr is the relevant one, not the earlier command's.
+            Ok(probe) => {
+                let detail = String::from_utf8_lossy(&probe.stderr).trim().to_string();
+                return Err(if detail.is_empty() {
+                    "pacman could not read the package database".to_string()
+                } else {
+                    format!("pacman could not read the package database: {detail}")
+                });
             }
-            // The probe itself never landed. Reporting a database problem here
-            // would name the wrong cause — the host just went away.
             Err(e) => return Err(format!("could not confirm the package list: {e}")),
         },
     };

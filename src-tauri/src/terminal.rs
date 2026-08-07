@@ -100,6 +100,19 @@ fn reboot_chain(restart: bool, reboot_cmd: &'static str, delay: u32) -> Option<(
     restart.then_some((reboot_cmd, delay))
 }
 
+/// argv for an interactive remote command.
+///
+/// `-t` forces a pty on the far side. Without one `sudo` has nowhere to prompt
+/// and dies with "a terminal is required to read the password", so remote
+/// updates only ever worked on hosts with NOPASSWD. These commands always run
+/// inside a terminal emulator, so the local stdin `-t` needs is present.
+///
+/// Deliberately not used by the *check* path in `tailscale.rs`: that output is
+/// parsed, and a pty would echo and line-wrap it.
+fn ssh_argv(target: String, cmd: String) -> Vec<String> {
+    vec!["ssh".to_string(), "-t".to_string(), target, cmd]
+}
+
 /// Append the reboot chain to a command that already carries its own flags.
 /// Separate from [`build_shell_cmd`] because the remote commands below end in
 /// `fi`, and a trailing ` --noconfirm` would land after it rather than on the
@@ -245,7 +258,7 @@ pub async fn run_remote_update(app_handle: tauri::AppHandle, hostname: &str, res
         reboot_chain(restart, "sudo reboot", cfg.delay),
     );
 
-    spawn_with(app_handle, prefix, vec!["ssh".to_string(), target, cmd], hostname.to_string()).await;
+    spawn_with(app_handle, prefix, ssh_argv(target, cmd), hostname.to_string()).await;
 }
 
 /// Update only the selected packages on a remote host. `selected` is every
@@ -271,7 +284,7 @@ pub async fn run_remote_update_packages(
         reboot_chain(restart, "sudo reboot", cfg.delay),
     );
 
-    spawn_with(app_handle, prefix, vec!["ssh".to_string(), target, cmd], hostname.to_string()).await;
+    spawn_with(app_handle, prefix, ssh_argv(target, cmd), hostname.to_string()).await;
 }
 
 /// Remove a local package in a terminal.
@@ -302,7 +315,7 @@ pub async fn run_remote_remove(
     let base = format!("sudo pacman -{flags} {package}");
     let cmd = build_shell_cmd(&base, cfg.noconfirm, None);
 
-    spawn_with(app_handle, prefix, vec!["ssh".to_string(), target, cmd], hostname.to_string()).await;
+    spawn_with(app_handle, prefix, ssh_argv(target, cmd), hostname.to_string()).await;
 }
 
 async fn spawn_with(

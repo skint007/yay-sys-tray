@@ -346,7 +346,10 @@
         activeKey === "local"
           ? runLocalUpdatePackages(sel, restart)
           : runRemoteUpdatePackages(activeKey, sel, restart);
-      p.catch(() => {});
+      // The remote command rejects when the selection no longer matches that
+      // host's last check. Swallowing it entirely would mean the click opened
+      // no terminal and said nothing anywhere.
+      p.catch((e) => console.error("update failed:", e));
     } else if (activeKey === "local") {
       runLocalUpdate(restart).catch(() => {});
     } else {
