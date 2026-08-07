@@ -1,3 +1,4 @@
+use crate::aur::QmOutcome;
 use crate::checker::{
     kernel_package_for, maybe_kernel_pkg, package_requires_restart, package_url,
     parse_package_descriptions, parse_si_repositories, parse_update_output, UpdateInfo,
@@ -25,6 +26,10 @@ pub struct HostResult {
     pub needs_restart: bool,
     pub restart_packages: Vec<String>,
     pub error: Option<String>,
+    /// Why this host's AUR check failed, if it did. Its repo updates are still
+    /// listed alongside; mirrors `CheckResult::aur_error` for the local check so
+    /// an AUR problem never reads as "up to date".
+    pub aur_error: Option<String>,
 }
 
 /// Get all unique tag names (without 'tag:' prefix) from Tailscale peers.
@@ -205,79 +210,153 @@ async fn remote_descriptions(
     }
 }
 
+/// Find a host's AUR updates without needing yay — or an AUR route — on the
+/// host itself. Only the package list comes over SSH; this machine does the
+/// AUR query and the version comparison.
+async fn remote_aur_updates(target: &str, timeout: u32) -> Result<Vec<UpdateInfo>, String> {
+    let output = ssh_run(target, "pacman -Qm", timeout)
+        .await
+        .map_err(|e| format!("pacman -Qm over SSH failed: {e}"))?;
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    // SSH reports its own failures as 255, which pacman never uses. Catch that
+    // before the pacman exit codes so a dropped connection isn't read as one of
+    // pacman's own statuses.
+    if output.status.code() == Some(255) {
+        return Err("SSH connection failed during AUR check".to_string());
+    }
+
+    let installed = match crate::aur::interpret_qm_output(output.status.code(), &stdout) {
+        QmOutcome::Packages(packages) => packages,
+        QmOutcome::Failed(reason) => {
+            return Err(match stderr.trim() {
+                "" => reason,
+                detail => format!("{reason}: {detail}"),
+            })
+        }
+        // Same ambiguity as the local check: pacman uses this status both for
+        // "no foreign packages" and for a database it couldn't read, so confirm
+        // before believing it.
+        QmOutcome::NoMatches => {
+            let probe = ssh_run(target, "pacman -Qq", timeout).await;
+            let readable = probe.map(|o| o.status.success()).unwrap_or(false);
+            if !readable {
+                return Err(match stderr.trim() {
+                    "" => "pacman could not read the local package database".to_string(),
+                    detail => format!("pacman -Qm failed: {detail}"),
+                });
+            }
+            Vec::new()
+        }
+    };
+
+    crate::aur::updates_for_installed(installed).await
+}
+
 /// SSH into a host and run checkupdates.
 async fn check_host(hostname: &str, timeout: u32, ssh_user: &str) -> HostResult {
     let target = ssh_target(hostname, ssh_user);
-    let empty = |error: Option<String>| HostResult {
+    let empty = |error: Option<String>, aur_error: Option<String>| HostResult {
         hostname: hostname.to_string(),
         updates: Vec::new(),
         needs_restart: false,
         restart_packages: Vec::new(),
         error,
+        aur_error,
     };
 
-    match ssh_run(&target, "checkupdates", timeout).await {
-        // checkupdates exit codes: 0 = updates available, 2 = no updates, and
-        // anything else is a real failure (1 = checkupdates error, 255 = ssh
-        // could not connect/authenticate). Mirror the local checker's handling
-        // so a dead or misconfigured host reports an error rather than silently
-        // showing as "up to date".
-        Ok(output) => match output.status.code() {
-            Some(0) => {
-                let stdout = String::from_utf8_lossy(&output.stdout);
-                if stdout.trim().is_empty() {
-                    return empty(None);
-                }
-                let mut updates = parse_update_output(&stdout);
-                let running_pkg = remote_kernel_package(&target, &updates, timeout).await;
+    let output = match ssh_run(&target, "checkupdates", timeout).await {
+        Ok(output) => output,
+        Err(e) if e.kind() == std::io::ErrorKind::TimedOut => {
+            return empty(Some("Connection timed out".to_string()), None)
+        }
+        Err(e) => return empty(Some(format!("SSH error: {e}")), None),
+    };
 
-                // Enrich with metadata that checkupdates omits. Run both remote
-                // queries together so descriptions do not add another SSH
-                // round-trip to the critical path.
-                let pkg_names: Vec<String> = updates.iter().map(|u| u.package.clone()).collect();
-                let (repos, descriptions) = tokio::join!(
-                    remote_repositories(&target, &pkg_names, timeout),
-                    remote_descriptions(&target, &pkg_names, timeout),
-                );
-                for u in &mut updates {
-                    if let Some((repo, arch)) = repos.get(&u.package) {
-                        u.repository = repo.clone();
-                        u.url = package_url(repo, arch, &u.package);
-                    }
-                    if let Some(description) = descriptions.get(&u.package) {
-                        u.description = description.clone();
-                    }
-                }
-
-                let restart_pkgs: Vec<String> = updates
-                    .iter()
-                    .filter(|u| package_requires_restart(&u.package, running_pkg.as_deref()))
-                    .map(|u| u.package.clone())
-                    .collect();
-                HostResult {
-                    hostname: hostname.to_string(),
-                    needs_restart: !restart_pkgs.is_empty(),
-                    restart_packages: restart_pkgs,
-                    updates,
-                    error: None,
-                }
-            }
-            Some(2) => empty(None),
-            Some(255) => empty(Some("SSH connection failed".to_string())),
-            _ => {
-                let stderr = String::from_utf8_lossy(&output.stderr);
-                let msg = stderr.trim();
-                empty(Some(if msg.is_empty() {
+    // checkupdates exit codes: 0 = updates available, 2 = no updates, and
+    // anything else is a real failure (1 = checkupdates error, 255 = ssh
+    // could not connect/authenticate). Mirror the local checker's handling
+    // so a dead or misconfigured host reports an error rather than silently
+    // showing as "up to date".
+    let mut updates = match output.status.code() {
+        Some(0) => parse_update_output(&String::from_utf8_lossy(&output.stdout)),
+        Some(2) => Vec::new(),
+        Some(255) => return empty(Some("SSH connection failed".to_string()), None),
+        _ => {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            let msg = stderr.trim();
+            return empty(
+                Some(if msg.is_empty() {
                     "checkupdates failed".to_string()
                 } else {
                     format!("checkupdates error: {msg}")
-                }))
-            }
-        },
-        Err(e) if e.kind() == std::io::ErrorKind::TimedOut => {
-            empty(Some("Connection timed out".to_string()))
+                }),
+                None,
+            );
         }
-        Err(e) => empty(Some(format!("SSH error: {e}"))),
+    };
+
+    // Only repo packages may go to `pacman -Si` below: it fails outright on a
+    // name absent from the sync databases, which would drop the repo badge from
+    // every package on the host, not just the AUR ones.
+    let repo_names: Vec<String> = updates.iter().map(|u| u.package.clone()).collect();
+
+    // The AUR half runs even when checkupdates found nothing. That is precisely
+    // the case this exists for — a host with no repo updates would otherwise
+    // report "up to date" while sitting on AUR updates.
+    let aur_error = match remote_aur_updates(&target, timeout).await {
+        Ok(aur_updates) => {
+            updates.extend(aur_updates);
+            None
+        }
+        Err(e) => {
+            log::warn!("AUR check failed for {hostname}: {e}");
+            Some(e)
+        }
+    };
+
+    if updates.is_empty() {
+        return empty(None, aur_error);
+    }
+
+    let running_pkg = remote_kernel_package(&target, &updates, timeout).await;
+
+    // Enrich with metadata that checkupdates omits. Run both remote queries
+    // together so descriptions do not add another SSH round-trip to the
+    // critical path. Descriptions cover AUR packages too — they are installed,
+    // so `pacman -Qi` resolves them.
+    let all_names: Vec<String> = updates.iter().map(|u| u.package.clone()).collect();
+    let (repos, descriptions) = tokio::join!(
+        remote_repositories(&target, &repo_names, timeout),
+        remote_descriptions(&target, &all_names, timeout),
+    );
+    for u in &mut updates {
+        // AUR rows carry their own repository and URL already, and are absent
+        // from this map, so they pass through untouched.
+        if let Some((repo, arch)) = repos.get(&u.package) {
+            u.repository = repo.clone();
+            u.url = package_url(repo, arch, &u.package);
+        }
+        if let Some(description) = descriptions.get(&u.package) {
+            u.description = description.clone();
+        }
+    }
+
+    let restart_pkgs: Vec<String> = updates
+        .iter()
+        .filter(|u| package_requires_restart(&u.package, running_pkg.as_deref()))
+        .map(|u| u.package.clone())
+        .collect();
+
+    HostResult {
+        hostname: hostname.to_string(),
+        needs_restart: !restart_pkgs.is_empty(),
+        restart_packages: restart_pkgs,
+        updates,
+        error: None,
+        aur_error,
     }
 }
 

@@ -917,8 +917,11 @@ async fn update_tray_state(
         .as_ref()
         .map(|r| r.needed)
         .unwrap_or(false);
-    // The count is missing its AUR half, so "up to date" would be a guess.
-    let aur_failed = result.aur_error.is_some();
+    // The count is missing its AUR half, so "up to date" would be a guess. Any
+    // host counts, local or remote — the icon speaks for the whole fleet.
+    let local_aur_failed = result.aur_error.is_some();
+    let aur_failed =
+        local_aur_failed || remote_hosts.iter().any(|h| h.aur_error.is_some());
 
     // Build tooltip
     let tray_state = app_handle.state::<TrayState>();
@@ -931,28 +934,50 @@ async fn update_tray_state(
         if result.needs_restart {
             local_label.push_str(" (restart)");
         }
+        if local_aur_failed {
+            local_label.push_str(" (AUR check failed)");
+        }
         lines.push(local_label);
 
         for host in remote_hosts {
             if let Some(ref err) = host.error {
                 lines.push(format!("{}: {err}", host.hostname));
-            } else if host.updates.is_empty() {
-                lines.push(format!("{}: up to date", host.hostname));
+                continue;
+            }
+            // Per host, because one host's AUR failure says nothing about the
+            // others — and a bare "up to date" here would be the same lie the
+            // local check was rebuilt to stop telling.
+            let aur_note = if host.aur_error.is_some() {
+                " (AUR check failed)"
+            } else {
+                ""
+            };
+            if host.updates.is_empty() {
+                let state = if host.aur_error.is_some() {
+                    "repos up to date"
+                } else {
+                    "up to date"
+                };
+                lines.push(format!("{}: {state}{aur_note}", host.hostname));
             } else {
                 let mut label = format!("{}: {} update(s)", host.hostname, host.updates.len());
                 if host.needs_restart {
                     label.push_str(" (restart)");
                 }
+                label.push_str(aur_note);
                 lines.push(label);
             }
         }
     } else if total_count == 0 {
         if reboot_needed {
             lines.push("Reboot required".to_string());
-        } else if aur_failed {
+        } else if local_aur_failed {
             lines.push("Repos up to date".to_string());
         } else {
             lines.push("System up to date".to_string());
+        }
+        if local_aur_failed {
+            lines.push("AUR check failed".to_string());
         }
     } else {
         lines.push(format!("{total_count} update(s) available"));
@@ -960,13 +985,11 @@ async fn update_tray_state(
             let pkgs = result.restart_packages.join(", ");
             lines.push(format!("Restart: {pkgs}"));
         }
-    }
-
-    // Stated after the counts, because it qualifies them: whatever number is
-    // above excludes the AUR. Without this the tray reads "System up to date"
-    // during an AUR outage, which is the failure this check was rebuilt to fix.
-    if aur_failed {
-        lines.push("AUR check failed".to_string());
+        // Stated after the count, because it qualifies it: the number above
+        // excludes the AUR.
+        if local_aur_failed {
+            lines.push("AUR check failed".to_string());
+        }
     }
 
     if let Some(time) = *last_check {

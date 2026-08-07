@@ -96,6 +96,18 @@
     return list;
   });
 
+  // Every host whose AUR half failed, local or remote. Collected fleet-wide
+  // rather than per selected host: a host with an AUR error and no repo updates
+  // never enters the sidebar, so a per-host banner would never show it.
+  let aurFailures = $derived.by(() => {
+    const out: { name: string; error: string }[] = [];
+    if (localResult?.aur_error) out.push({ name: "Local", error: localResult.aur_error });
+    for (const h of remoteHosts) {
+      if (h.aur_error) out.push({ name: h.hostname, error: h.aur_error });
+    }
+    return out;
+  });
+
   let totalCount = $derived(hosts.reduce((s, h) => s + h.updates.length, 0));
   let multiHost = $derived(hosts.length > 1);
   // Any remote host was scanned this run — the Tailscale feature is in play, so
@@ -375,10 +387,17 @@
   <!-- Rendered above the results so it shows whether or not any repo updates
        were found — an AUR outage with an otherwise up-to-date system would
        otherwise land on the "System is up to date" screen. -->
-  {#if !checking && !loading && localResult?.aur_error}
+  {#if !checking && !loading && aurFailures.length > 0}
     <div class="aur-error" role="status">
       <span class="aur-error-dot"></span>
-      <span class="aur-error-text">AUR check failed — AUR updates not shown. {localResult.aur_error}</span>
+      <span class="aur-error-text">
+        {#if aurFailures.length === 1}
+          AUR check failed on {aurFailures[0].name} — AUR updates not shown. {aurFailures[0].error}
+        {:else}
+          AUR check failed on {aurFailures.length} hosts — AUR updates not shown:
+          {aurFailures.map((f) => f.name).join(", ")}
+        {/if}
+      </span>
     </div>
   {/if}
 
