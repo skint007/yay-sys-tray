@@ -103,9 +103,21 @@
     const out: { name: string; error: string }[] = [];
     if (localResult?.aur_error) out.push({ name: "Local", error: localResult.aur_error });
     for (const h of remoteHosts) {
-      if (h.aur_error) out.push({ name: h.hostname, error: h.aur_error });
+      // A host we couldn't reach at all already reports that as its error; its
+      // AUR result is meaningless and would only crowd the banner.
+      if (h.aur_error && !h.error) out.push({ name: h.hostname, error: h.aur_error });
     }
     return out;
+  });
+
+  // The AUR query for every host runs from this machine, so one outage sets the
+  // error on all of them at once — the multi-host case is the common one, and
+  // dropping the reason there would leave it visible nowhere in the UI.
+  let aurSummary = $derived.by(() => {
+    if (aurFailures.length === 0) return null;
+    const names = aurFailures.map((f) => f.name).join(", ");
+    const shared = aurFailures.every((f) => f.error === aurFailures[0].error);
+    return { count: aurFailures.length, names, error: aurFailures[0].error, shared };
   });
 
   let totalCount = $derived(hosts.reduce((s, h) => s + h.updates.length, 0));
@@ -387,15 +399,18 @@
   <!-- Rendered above the results so it shows whether or not any repo updates
        were found — an AUR outage with an otherwise up-to-date system would
        otherwise land on the "System is up to date" screen. -->
-  {#if !checking && !loading && aurFailures.length > 0}
+  {#if !checking && !loading && aurSummary}
     <div class="aur-error" role="status">
       <span class="aur-error-dot"></span>
       <span class="aur-error-text">
-        {#if aurFailures.length === 1}
-          AUR check failed on {aurFailures[0].name} — AUR updates not shown. {aurFailures[0].error}
+        {#if aurSummary.count === 1}
+          AUR check failed on {aurSummary.names} — AUR updates not shown. {aurSummary.error}
+        {:else if aurSummary.shared}
+          AUR check failed on {aurSummary.count} hosts ({aurSummary.names}) — AUR updates not
+          shown. {aurSummary.error}
         {:else}
-          AUR check failed on {aurFailures.length} hosts — AUR updates not shown:
-          {aurFailures.map((f) => f.name).join(", ")}
+          AUR check failed on {aurSummary.count} hosts ({aurSummary.names}) — AUR updates not
+          shown. First: {aurSummary.error}
         {/if}
       </span>
     </div>

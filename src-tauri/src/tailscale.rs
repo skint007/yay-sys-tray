@@ -203,10 +203,12 @@ async fn remote_descriptions(
     }
     let command = format!("pacman -Qi {}", packages.join(" "));
     match ssh_run(target, &command, timeout).await {
-        Ok(out) if out.status.success() => {
-            parse_package_descriptions(&String::from_utf8_lossy(&out.stdout))
-        }
-        _ => HashMap::new(),
+        // Parsed regardless of exit status, matching the local path: `pacman
+        // -Qi` exits non-zero if any single name is unknown while still
+        // printing the records it did find. Requiring success would blank every
+        // description because of one package removed on the host mid-check.
+        Ok(out) => parse_package_descriptions(&String::from_utf8_lossy(&out.stdout)),
+        Err(_) => HashMap::new(),
     }
 }
 
@@ -239,17 +241,20 @@ async fn remote_aur_updates(target: &str, timeout: u32) -> Result<Vec<UpdateInfo
         // Same ambiguity as the local check: pacman uses this status both for
         // "no foreign packages" and for a database it couldn't read, so confirm
         // before believing it.
-        QmOutcome::NoMatches => {
-            let probe = ssh_run(target, "pacman -Qq", timeout).await;
-            let readable = probe.map(|o| o.status.success()).unwrap_or(false);
-            if !readable {
+        QmOutcome::NoMatches => match ssh_run(target, "pacman -Qq", timeout).await {
+            Ok(probe) if probe.status.success() => Vec::new(),
+            // The probe reached the host and pacman still couldn't list
+            // anything, so the empty result was hiding an unreadable database.
+            Ok(_) => {
                 return Err(match stderr.trim() {
-                    "" => "pacman could not read the local package database".to_string(),
+                    "" => "pacman could not read the package database".to_string(),
                     detail => format!("pacman -Qm failed: {detail}"),
-                });
+                })
             }
-            Vec::new()
-        }
+            // The probe itself never landed. Reporting a database problem here
+            // would name the wrong cause — the host just went away.
+            Err(e) => return Err(format!("could not confirm the package list: {e}")),
+        },
     };
 
     crate::aur::updates_for_installed(installed).await

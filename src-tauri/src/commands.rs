@@ -110,11 +110,39 @@ pub async fn run_local_update_packages(
 #[tauri::command]
 pub async fn run_remote_update_packages(
     app_handle: tauri::AppHandle,
+    tray_state: State<'_, TrayState>,
     hostname: String,
     packages: Vec<String>,
     restart: bool,
-) {
-    terminal::run_remote_update_packages(app_handle, &hostname, packages, restart).await;
+) -> Result<(), String> {
+    // Resolve the selection against that host's last check rather than taking
+    // the names as given. It is what separates repo packages from AUR ones —
+    // the pacman fallback must never see an AUR name — and it keeps anything
+    // that isn't a known update from reaching the command string at all.
+    let (selected, repo_only) = {
+        let hosts = tray_state.remote_results.read().await;
+        let Some(host) = hosts.iter().find(|h| h.hostname == hostname) else {
+            return Err(format!("No check results for {hostname}"));
+        };
+        let mut selected = Vec::new();
+        let mut repo_only = Vec::new();
+        for update in &host.updates {
+            if packages.contains(&update.package) {
+                selected.push(update.package.clone());
+                if update.repository != "aur" {
+                    repo_only.push(update.package.clone());
+                }
+            }
+        }
+        (selected, repo_only)
+    };
+
+    if selected.is_empty() {
+        return Err(format!("None of the selected packages are pending on {hostname}"));
+    }
+
+    terminal::run_remote_update_packages(app_handle, &hostname, selected, repo_only, restart).await;
+    Ok(())
 }
 
 #[tauri::command]

@@ -917,11 +917,13 @@ async fn update_tray_state(
         .as_ref()
         .map(|r| r.needed)
         .unwrap_or(false);
-    // The count is missing its AUR half, so "up to date" would be a guess. Any
-    // host counts, local or remote — the icon speaks for the whole fleet.
+    // The local count is missing its AUR half, so "up to date" would be a
+    // guess. Scoped to the local machine on purpose: a remote host that is
+    // entirely unreachable already leaves the icon alone, so letting a remote
+    // AUR failure redden it would rank the smaller unknown higher. One flaky
+    // host would otherwise hold the tray red until it came back, which costs
+    // the icon its meaning. Remote failures live in the tooltip and the window.
     let local_aur_failed = result.aur_error.is_some();
-    let aur_failed =
-        local_aur_failed || remote_hosts.iter().any(|h| h.aur_error.is_some());
 
     // Build tooltip
     let tray_state = app_handle.state::<TrayState>();
@@ -940,33 +942,30 @@ async fn update_tray_state(
         lines.push(local_label);
 
         for host in remote_hosts {
-            if let Some(ref err) = host.error {
-                lines.push(format!("{}: {err}", host.hostname));
-                continue;
-            }
-            // Per host, because one host's AUR failure says nothing about the
-            // others — and a bare "up to date" here would be the same lie the
-            // local check was rebuilt to stop telling.
-            let aur_note = if host.aur_error.is_some() {
-                " (AUR check failed)"
-            } else {
-                ""
-            };
-            if host.updates.is_empty() {
-                let state = if host.aur_error.is_some() {
-                    "repos up to date"
-                } else {
-                    "up to date"
-                };
-                lines.push(format!("{}: {state}{aur_note}", host.hostname));
-            } else {
-                let mut label = format!("{}: {} update(s)", host.hostname, host.updates.len());
-                if host.needs_restart {
-                    label.push_str(" (restart)");
+            // Qualified per host, because one host's AUR failure says nothing
+            // about the others — and a bare "up to date" would be the same lie
+            // the local check was rebuilt to stop telling.
+            let aur_failed = host.aur_error.is_some();
+            let mut label = match (&host.error, host.updates.len()) {
+                // Reached the host but its AUR half failed, so the repo half is
+                // all that "up to date" can honestly cover.
+                (None, 0) if aur_failed => format!("{}: repos up to date", host.hostname),
+                (None, 0) => format!("{}: up to date", host.hostname),
+                (None, n) => {
+                    let mut s = format!("{}: {n} update(s)", host.hostname);
+                    if host.needs_restart {
+                        s.push_str(" (restart)");
+                    }
+                    s
                 }
-                label.push_str(aur_note);
-                lines.push(label);
+                (Some(err), _) => format!("{}: {err}", host.hostname),
+            };
+            // Appended only where the wording doesn't already carry it, so the
+            // line never says the same thing twice.
+            if aur_failed && !label.ends_with("repos up to date") {
+                label.push_str(" (AUR check failed)");
             }
+            lines.push(label);
         }
     } else if total_count == 0 {
         if reboot_needed {
@@ -1008,7 +1007,7 @@ async fn update_tray_state(
         // half failed — the error icon sends the user to the tooltip instead.
         set_tray_icon(
             app_handle,
-            if aur_failed {
+            if local_aur_failed {
                 icons::create_error_icon()
             } else {
                 icons::create_ok_icon()
