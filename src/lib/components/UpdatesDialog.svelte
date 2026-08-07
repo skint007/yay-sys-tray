@@ -96,6 +96,30 @@
     return list;
   });
 
+  // Every host whose AUR half failed, local or remote. Collected fleet-wide
+  // rather than per selected host: a host with an AUR error and no repo updates
+  // never enters the sidebar, so a per-host banner would never show it.
+  let aurFailures = $derived.by(() => {
+    const out: { name: string; error: string }[] = [];
+    if (localResult?.aur_error) out.push({ name: "Local", error: localResult.aur_error });
+    for (const h of remoteHosts) {
+      // A host we couldn't reach at all already reports that as its error; its
+      // AUR result is meaningless and would only crowd the banner.
+      if (h.aur_error && !h.error) out.push({ name: h.hostname, error: h.aur_error });
+    }
+    return out;
+  });
+
+  // The AUR query for every host runs from this machine, so one outage sets the
+  // error on all of them at once — the multi-host case is the common one, and
+  // dropping the reason there would leave it visible nowhere in the UI.
+  let aurSummary = $derived.by(() => {
+    if (aurFailures.length === 0) return null;
+    const names = aurFailures.map((f) => f.name).join(", ");
+    const shared = aurFailures.every((f) => f.error === aurFailures[0].error);
+    return { count: aurFailures.length, names, error: aurFailures[0].error, shared };
+  });
+
   let totalCount = $derived(hosts.reduce((s, h) => s + h.updates.length, 0));
   let multiHost = $derived(hosts.length > 1);
   // Any remote host was scanned this run — the Tailscale feature is in play, so
@@ -322,7 +346,10 @@
         activeKey === "local"
           ? runLocalUpdatePackages(sel, restart)
           : runRemoteUpdatePackages(activeKey, sel, restart);
-      p.catch(() => {});
+      // The remote command rejects when the selection no longer matches that
+      // host's last check. Swallowing it entirely would mean the click opened
+      // no terminal and said nothing anywhere.
+      p.catch((e) => console.error("update failed:", e));
     } else if (activeKey === "local") {
       runLocalUpdate(restart).catch(() => {});
     } else {
@@ -375,10 +402,20 @@
   <!-- Rendered above the results so it shows whether or not any repo updates
        were found — an AUR outage with an otherwise up-to-date system would
        otherwise land on the "System is up to date" screen. -->
-  {#if !checking && !loading && localResult?.aur_error}
+  {#if !checking && !loading && aurSummary}
     <div class="aur-error" role="status">
       <span class="aur-error-dot"></span>
-      <span class="aur-error-text">AUR check failed — AUR updates not shown. {localResult.aur_error}</span>
+      <span class="aur-error-text">
+        {#if aurSummary.count === 1}
+          AUR check failed on {aurSummary.names} — AUR updates not shown. {aurSummary.error}
+        {:else if aurSummary.shared}
+          AUR check failed on {aurSummary.count} hosts ({aurSummary.names}) — AUR updates not
+          shown. {aurSummary.error}
+        {:else}
+          AUR check failed on {aurSummary.count} hosts ({aurSummary.names}) — AUR updates not
+          shown. First: {aurSummary.error}
+        {/if}
+      </span>
     </div>
   {/if}
 

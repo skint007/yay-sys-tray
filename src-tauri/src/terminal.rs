@@ -100,6 +100,72 @@ fn reboot_chain(restart: bool, reboot_cmd: &'static str, delay: u32) -> Option<(
     restart.then_some((reboot_cmd, delay))
 }
 
+/// argv for an interactive remote command.
+///
+/// `-t` forces a pty on the far side. Without one `sudo` has nowhere to prompt
+/// and dies with "a terminal is required to read the password", so remote
+/// updates only ever worked on hosts with NOPASSWD. These commands always run
+/// inside a terminal emulator, so the local stdin `-t` needs is present.
+///
+/// Deliberately not used by the *check* path in `tailscale.rs`: that output is
+/// parsed, and a pty would echo and line-wrap it.
+fn ssh_argv(target: String, cmd: String) -> Vec<String> {
+    vec!["ssh".to_string(), "-t".to_string(), target, cmd]
+}
+
+/// Append the reboot chain to a command that already carries its own flags.
+/// Separate from [`build_shell_cmd`] because the remote commands below end in
+/// `fi`, and a trailing ` --noconfirm` would land after it rather than on the
+/// pacman/yay call.
+fn with_reboot(base: String, reboot: Option<(&str, u32)>) -> String {
+    match reboot {
+        Some((cmd, delay)) => format!("{base} && {}", delayed_reboot_cmd(cmd, delay)),
+        None => base,
+    }
+}
+
+/// Full-system update for a remote host.
+///
+/// yay covers repo and AUR packages in one pass, so it is preferred wherever
+/// the host has it. Plain `pacman -Syu` skips foreign packages entirely, which
+/// would leave the AUR updates this app now reports permanently unactionable.
+/// The check runs on the host, so no extra probe round-trip is needed.
+fn remote_full_update_cmd(noconfirm: bool) -> String {
+    let flag = if noconfirm { " --noconfirm" } else { "" };
+    format!(
+        "if command -v yay >/dev/null 2>&1; then yay -Syu{flag}; \
+         else sudo pacman -Syu{flag}; fi"
+    )
+}
+
+/// Install a chosen set of packages on a remote host.
+///
+/// `yay -S` accepts repo and AUR names together, so the preferred branch just
+/// passes everything. The pacman fallback is given repo names only on purpose:
+/// `pacman -S` aborts the whole transaction on a name missing from the sync
+/// databases, so including an AUR name there would stop the repo packages from
+/// installing too. When that costs the user something, the command says so
+/// rather than quietly installing a subset.
+fn remote_install_cmd(selected: &[String], repo_only: &[String], noconfirm: bool) -> String {
+    let flag = if noconfirm { " --noconfirm" } else { "" };
+    let with_yay = format!("yay -S {}{flag}", selected.join(" "));
+
+    let without_yay = if repo_only.is_empty() {
+        "echo 'yay is not installed on this host, and every selected package is from the AUR' >&2; exit 1"
+            .to_string()
+    } else if repo_only.len() == selected.len() {
+        format!("sudo pacman -S {}{flag}", repo_only.join(" "))
+    } else {
+        format!(
+            "echo 'yay is not installed on this host, skipping the selected AUR packages' >&2; \
+             sudo pacman -S {}{flag}",
+            repo_only.join(" ")
+        )
+    };
+
+    format!("if command -v yay >/dev/null 2>&1; then {with_yay}; else {without_yay}; fi")
+}
+
 /// Passwordless installs can reboot without sudo (a NOPASSWD systemctl call).
 fn local_reboot_cmd(passwordless: bool) -> &'static str {
     if passwordless {
@@ -187,23 +253,25 @@ pub async fn run_remote_update(app_handle: tauri::AppHandle, hostname: &str, res
     let target = ssh_target(hostname, &cfg.ssh_user);
     let prefix = terminal_prefix(&cfg.terminal, Some(&format!("Updating: {hostname}")), cfg.hold);
 
-    let cmd = build_shell_cmd(
-        "sudo pacman -Syu",
-        cfg.noconfirm,
+    let cmd = with_reboot(
+        remote_full_update_cmd(cfg.noconfirm),
         reboot_chain(restart, "sudo reboot", cfg.delay),
     );
 
-    spawn_with(app_handle, prefix, vec!["ssh".to_string(), target, cmd], hostname.to_string()).await;
+    spawn_with(app_handle, prefix, ssh_argv(target, cmd), hostname.to_string()).await;
 }
 
-/// Update only the selected packages on a remote host.
+/// Update only the selected packages on a remote host. `selected` is every
+/// chosen package; `repo_only` is the subset that lives in a sync database,
+/// which is all the pacman fallback may be given.
 pub async fn run_remote_update_packages(
     app_handle: tauri::AppHandle,
     hostname: &str,
-    packages: Vec<String>,
+    selected: Vec<String>,
+    repo_only: Vec<String>,
     restart: bool,
 ) {
-    if packages.is_empty() {
+    if selected.is_empty() {
         return run_remote_update(app_handle, hostname, restart).await;
     }
     let cfg = term_cfg(&app_handle).await;
@@ -211,10 +279,12 @@ pub async fn run_remote_update_packages(
     let prefix =
         terminal_prefix(&cfg.terminal, Some(&format!("Updating: {hostname} (selected)")), cfg.hold);
 
-    let base = format!("sudo pacman -S {}", packages.join(" "));
-    let cmd = build_shell_cmd(&base, cfg.noconfirm, reboot_chain(restart, "sudo reboot", cfg.delay));
+    let cmd = with_reboot(
+        remote_install_cmd(&selected, &repo_only, cfg.noconfirm),
+        reboot_chain(restart, "sudo reboot", cfg.delay),
+    );
 
-    spawn_with(app_handle, prefix, vec!["ssh".to_string(), target, cmd], hostname.to_string()).await;
+    spawn_with(app_handle, prefix, ssh_argv(target, cmd), hostname.to_string()).await;
 }
 
 /// Remove a local package in a terminal.
@@ -245,7 +315,7 @@ pub async fn run_remote_remove(
     let base = format!("sudo pacman -{flags} {package}");
     let cmd = build_shell_cmd(&base, cfg.noconfirm, None);
 
-    spawn_with(app_handle, prefix, vec!["ssh".to_string(), target, cmd], hostname.to_string()).await;
+    spawn_with(app_handle, prefix, ssh_argv(target, cmd), hostname.to_string()).await;
 }
 
 async fn spawn_with(
@@ -277,5 +347,72 @@ async fn spawn_and_wait(app_handle: tauri::AppHandle, cmd: Vec<String>, scope: S
             });
         }
         Err(e) => log::error!("Failed to spawn terminal: {e}"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn full_update_prefers_yay_and_falls_back_to_pacman() {
+        let cmd = remote_full_update_cmd(false);
+        assert!(cmd.contains("command -v yay"));
+        assert!(cmd.contains("yay -Syu"));
+        // pacman -Syu alone would never update the AUR packages this app now
+        // reports for remote hosts, so yay must be the preferred branch.
+        assert!(cmd.contains("sudo pacman -Syu"));
+        assert!(!cmd.contains("--noconfirm"));
+        assert_eq!(remote_full_update_cmd(true).matches("--noconfirm").count(), 2);
+    }
+
+    #[test]
+    fn install_passes_everything_to_yay() {
+        let selected = vec!["repo-pkg".to_string(), "aur-pkg".to_string()];
+        let repo_only = vec!["repo-pkg".to_string()];
+        let cmd = remote_install_cmd(&selected, &repo_only, false);
+        assert!(cmd.contains("yay -S repo-pkg aur-pkg"));
+    }
+
+    #[test]
+    fn pacman_fallback_never_receives_an_aur_name() {
+        // `pacman -S` aborts the whole transaction on a name it can't resolve,
+        // so an AUR name in the fallback would block the repo updates too.
+        let selected = vec!["repo-pkg".to_string(), "aur-pkg".to_string()];
+        let repo_only = vec!["repo-pkg".to_string()];
+        let cmd = remote_install_cmd(&selected, &repo_only, false);
+        let fallback = cmd.split("else").nth(1).expect("fallback branch");
+        assert!(fallback.contains("sudo pacman -S repo-pkg"));
+        assert!(!fallback.contains("aur-pkg"));
+        assert!(fallback.contains("skipping the selected AUR packages"));
+    }
+
+    #[test]
+    fn all_aur_selection_without_yay_fails_loudly() {
+        // Nothing pacman can do here, and silently succeeding would leave the
+        // user thinking the update ran.
+        let selected = vec!["aur-pkg".to_string()];
+        let cmd = remote_install_cmd(&selected, &[], false);
+        let fallback = cmd.split("else").nth(1).expect("fallback branch");
+        assert!(fallback.contains("exit 1"));
+        assert!(!fallback.contains("pacman -S "));
+    }
+
+    #[test]
+    fn repo_only_selection_has_no_warning_noise() {
+        let selected = vec!["a".to_string(), "b".to_string()];
+        let cmd = remote_install_cmd(&selected, &selected, true);
+        assert!(cmd.contains("sudo pacman -S a b --noconfirm"));
+        assert!(!cmd.contains("skipping"));
+    }
+
+    #[test]
+    fn reboot_chain_lands_after_the_conditional() {
+        // The command ends in `fi`, so the chain has to be appended rather than
+        // folded in the way build_shell_cmd does it.
+        let base = remote_full_update_cmd(false);
+        let chained = with_reboot(base, Some(("sudo reboot", 30)));
+        assert!(chained.contains("fi &&"));
+        assert!(chained.trim_end().ends_with("sudo reboot"));
     }
 }

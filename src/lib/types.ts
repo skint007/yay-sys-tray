@@ -29,6 +29,9 @@ export interface HostResult {
   needs_restart: boolean;
   restart_packages: string[];
   error: string | null;
+  /** Set when this host's AUR check failed. Its repo updates are still listed
+   * alongside; mirrors CheckResult.aur_error for the local check. */
+  aur_error: string | null;
 }
 
 export interface FullCheckResult {

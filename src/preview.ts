@@ -31,9 +31,9 @@ const config = {
 const checkResult = {
   local: { updates: mkUpdates(), needs_restart: true, restart_packages: ["linux", "systemd"], reboot_info: null, aur_error: null },
   remote: [
-    { hostname: "arch-serv", updates: mkUpdates().slice(0, 4), needs_restart: true, restart_packages: ["linux"], error: null },
-    { hostname: "arch-serv-gpu", updates: mkUpdates().slice(2, 5), needs_restart: false, restart_packages: [], error: null },
-    { hostname: "uswest-arch-dns3", updates: mkUpdates().slice(3), needs_restart: true, restart_packages: ["systemd"], error: null },
+    { hostname: "arch-serv", updates: mkUpdates().slice(0, 4), needs_restart: true, restart_packages: ["linux"], error: null, aur_error: null },
+    { hostname: "arch-serv-gpu", updates: mkUpdates().slice(2, 5), needs_restart: false, restart_packages: [], error: null, aur_error: null },
+    { hostname: "uswest-arch-dns3", updates: mkUpdates().slice(3), needs_restart: true, restart_packages: ["systemd"], error: null, aur_error: null },
   ],
 };
 
@@ -77,13 +77,40 @@ const aurErrorResult = {
   remote: [],
 };
 
+// Surface #8 — the same banner when more than one host's AUR check failed. It
+// collapses to a name list rather than repeating each error, and the remote
+// host below has no repo updates, so it never reaches the sidebar: this view is
+// the only way that failure is visible at all.
+const aurErrorFleetResult = {
+  local: {
+    updates: mkUpdates().slice(0, 3),
+    needs_restart: false,
+    restart_packages: [],
+    reboot_info: null,
+    aur_error: "AUR returned HTTP 503 Service Unavailable",
+  },
+  remote: [
+    {
+      hostname: "arch-serv-remote", updates: [], needs_restart: false, restart_packages: [],
+      error: null, aur_error: "pacman -Qm over SSH failed: Connection timed out",
+    },
+    {
+      hostname: "arch-serv-gpu", updates: mkUpdates().slice(0, 2), needs_restart: false,
+      restart_packages: [], error: null, aur_error: null,
+    },
+  ],
+};
+
 const params = new URLSearchParams(location.search);
 const view = params.get("view") ?? "updates";
 
 mockIPC((cmd: string) => {
   switch (cmd) {
     case "get_config": return config;
-    case "get_check_result": return view === "aurerror" ? aurErrorResult : checkResult;
+    case "get_check_result":
+      if (view === "aurerror") return aurErrorResult;
+      if (view === "aurerror-fleet") return aurErrorFleetResult;
+      return checkResult;
     case "discover_tailscale_tags":
       return ["admin", "arch", "cloud", "desktop", "dns", "kvm", "laptop", "linux", "mobile", "router", "server", "windows"];
     case "get_version": return "0.10.3";
@@ -98,7 +125,7 @@ document.documentElement.setAttribute("data-theme", `skint007-${params.get("them
 
 const sizes: Record<string, [number, number]> = {
   updates: [920, 620], settings: [560, 690], about: [480, 460], deptree: [720, 560],
-  checking: [920, 620], aurerror: [920, 620],
+  checking: [920, 620], aurerror: [920, 620], "aurerror-fleet": [920, 620],
 };
 const [w, h] = sizes[view] ?? [920, 620];
 const target = document.getElementById("app")!;

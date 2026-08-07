@@ -113,9 +113,10 @@ async fn foreign_packages() -> Result<Vec<(String, String)>, String> {
     }
 }
 
-/// What a `pacman -Qm` run reported.
+/// What a `pacman -Qm` run reported. Public so the remote (SSH) check can
+/// apply the same rules to a host's output as the local check does.
 #[derive(Debug, PartialEq)]
-enum QmOutcome {
+pub enum QmOutcome {
     Packages(Vec<(String, String)>),
     /// Pacman's "nothing matched" exit. On a machine with no AUR packages this
     /// is the healthy state, but the same status covers some real failures, so
@@ -130,7 +131,7 @@ enum QmOutcome {
 /// Deliberately ignores stderr: pacman prints warnings there on perfectly
 /// healthy systems (an un-synced repo, say), so treating output on stderr as
 /// failure would report those machines as broken forever.
-fn interpret_qm_output(exit_code: Option<i32>, stdout: &str) -> QmOutcome {
+pub fn interpret_qm_output(exit_code: Option<i32>, stdout: &str) -> QmOutcome {
     match exit_code {
         Some(0) => match parse_foreign_packages(stdout) {
             Ok(packages) => QmOutcome::Packages(packages),
@@ -207,7 +208,18 @@ async fn fetch_aur_versions(names: &[String]) -> Result<HashMap<String, String>,
 /// the same as "no AUR updates", which is exactly how the old yay-based check
 /// failed.
 pub async fn check_aur_updates() -> Result<Vec<UpdateInfo>, String> {
-    let installed = foreign_packages().await?;
+    updates_for_installed(foreign_packages().await?).await
+}
+
+/// Compare an already-gathered list of foreign packages against the AUR.
+///
+/// Split from [`check_aur_updates`] so remote hosts can reuse it: the package
+/// list comes back over SSH, but the AUR query and the version comparison
+/// happen here. A monitored host therefore needs neither yay nor its own route
+/// to the AUR.
+pub async fn updates_for_installed(
+    installed: Vec<(String, String)>,
+) -> Result<Vec<UpdateInfo>, String> {
     if installed.is_empty() {
         return Ok(Vec::new());
     }

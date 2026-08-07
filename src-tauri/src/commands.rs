@@ -107,14 +107,56 @@ pub async fn run_local_update_packages(
     terminal::run_local_update_packages(app_handle, packages, restart).await;
 }
 
+/// Resolve a selection against a host's known updates, returning (all selected,
+/// the subset from a sync repository).
+///
+/// Names are taken from `updates`, not from `wanted`, so nothing that isn't a
+/// pending update on that host can reach the interpolated command string. The
+/// repo subset exists because the pacman fallback aborts its whole transaction
+/// on an AUR name.
+fn split_selection(
+    updates: &[crate::checker::UpdateInfo],
+    wanted: &[String],
+) -> (Vec<String>, Vec<String>) {
+    let mut selected = Vec::new();
+    let mut repo_only = Vec::new();
+    for update in updates {
+        if wanted.contains(&update.package) {
+            selected.push(update.package.clone());
+            if update.repository != "aur" {
+                repo_only.push(update.package.clone());
+            }
+        }
+    }
+    (selected, repo_only)
+}
+
 #[tauri::command]
 pub async fn run_remote_update_packages(
     app_handle: tauri::AppHandle,
+    tray_state: State<'_, TrayState>,
     hostname: String,
     packages: Vec<String>,
     restart: bool,
-) {
-    terminal::run_remote_update_packages(app_handle, &hostname, packages, restart).await;
+) -> Result<(), String> {
+    // Resolve the selection against that host's last check rather than taking
+    // the names as given. It is what separates repo packages from AUR ones —
+    // the pacman fallback must never see an AUR name — and it keeps anything
+    // that isn't a known update from reaching the command string at all.
+    let (selected, repo_only) = {
+        let hosts = tray_state.remote_results.read().await;
+        let Some(host) = hosts.iter().find(|h| h.hostname == hostname) else {
+            return Err(format!("No check results for {hostname}"));
+        };
+        split_selection(&host.updates, &packages)
+    };
+
+    if selected.is_empty() {
+        return Err(format!("None of the selected packages are pending on {hostname}"));
+    }
+
+    terminal::run_remote_update_packages(app_handle, &hostname, selected, repo_only, restart).await;
+    Ok(())
 }
 
 #[tauri::command]
@@ -161,4 +203,51 @@ pub fn get_version() -> String {
 #[tauri::command]
 pub fn quit_app(app_handle: tauri::AppHandle) {
     app_handle.exit(0);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::checker::UpdateInfo;
+
+    fn upd(package: &str, repository: &str) -> UpdateInfo {
+        UpdateInfo {
+            package: package.to_string(),
+            old_version: "1.0-1".to_string(),
+            new_version: "1.1-1".to_string(),
+            description: String::new(),
+            repository: repository.to_string(),
+            url: String::new(),
+        }
+    }
+
+    #[test]
+    fn separates_aur_packages_from_repo_ones() {
+        let updates = vec![upd("linux", "core"), upd("yay-bin", "aur"), upd("jq", "extra")];
+        let wanted = vec!["linux".to_string(), "yay-bin".to_string(), "jq".to_string()];
+        let (selected, repo_only) = split_selection(&updates, &wanted);
+        assert_eq!(selected, vec!["linux", "yay-bin", "jq"]);
+        // The pacman fallback would abort the whole transaction on "yay-bin".
+        assert_eq!(repo_only, vec!["linux", "jq"]);
+    }
+
+    #[test]
+    fn drops_names_that_are_not_pending_updates() {
+        // The names arrive from the frontend and land in a shell command, so
+        // only packages this host actually has pending may pass through.
+        let updates = vec![upd("linux", "core")];
+        let wanted = vec!["linux".to_string(), "$(reboot)".to_string(), "ghost".to_string()];
+        let (selected, repo_only) = split_selection(&updates, &wanted);
+        assert_eq!(selected, vec!["linux"]);
+        assert_eq!(repo_only, vec!["linux"]);
+    }
+
+    #[test]
+    fn honours_a_partial_selection() {
+        let updates = vec![upd("linux", "core"), upd("yay-bin", "aur")];
+        let wanted = vec!["yay-bin".to_string()];
+        let (selected, repo_only) = split_selection(&updates, &wanted);
+        assert_eq!(selected, vec!["yay-bin"]);
+        assert!(repo_only.is_empty());
+    }
 }
