@@ -126,7 +126,7 @@ jobs:
           sed -i "s|^sha256sums=.*|sha256sums=('${SHA}')|" aur/bin/PKGBUILD
 
       - name: Publish to AUR
-        uses: KSXGitHub/github-actions-deploy-aur@v3.0.1
+        uses: KSXGitHub/github-actions-deploy-aur@v4.2.0
         with:
           pkgname: yay-sys-tray-bin
           pkgbuild: ./aur/bin/PKGBUILD
