@@ -1,7 +1,7 @@
 //! Linux WebKitGTK renderer compatibility workarounds.
 
 use std::ffi::{CStr, CString, OsStr};
-use std::os::raw::{c_char, c_int, c_void};
+use std::os::raw::{c_char, c_int, c_uint, c_void};
 use std::os::unix::fs::FileTypeExt;
 use std::path::Path;
 
@@ -327,12 +327,15 @@ fn egl_vendor_manifest_selects_nvidia(path: &str) -> bool {
 fn wayland_egl_vendor_is_nvidia(wayland_display: Option<&str>) -> Option<bool> {
     type WlDisplayConnect = unsafe extern "C" fn(*const c_char) -> *mut c_void;
     type WlDisplayDisconnect = unsafe extern "C" fn(*mut c_void);
-    type EglGetDisplay = unsafe extern "C" fn(*mut c_void) -> *mut c_void;
+    type EglGetPlatformDisplay =
+        unsafe extern "C" fn(c_uint, *mut c_void, *const c_void) -> *mut c_void;
+    type EglGetProcAddress = unsafe extern "C" fn(*const c_char) -> *const c_void;
     type EglInitialize = unsafe extern "C" fn(*mut c_void, *mut c_int, *mut c_int) -> c_int;
     type EglQueryString = unsafe extern "C" fn(*mut c_void, c_int) -> *const c_char;
     type EglTerminate = unsafe extern "C" fn(*mut c_void) -> c_int;
 
     const EGL_VENDOR: c_int = 0x3053;
+    const EGL_PLATFORM_WAYLAND_KHR: c_uint = 0x31D8;
 
     // SAFETY: Every symbol is loaded from the library that defines its C ABI.
     // The Wayland and EGL handles stay alive until all copied function pointers
@@ -343,7 +346,17 @@ fn wayland_egl_vendor_is_nvidia(wayland_display: Option<&str>) -> Option<bool> {
         let wl_display_connect: WlDisplayConnect = *wayland.get(b"wl_display_connect\0").ok()?;
         let wl_display_disconnect: WlDisplayDisconnect =
             *wayland.get(b"wl_display_disconnect\0").ok()?;
-        let egl_get_display: EglGetDisplay = *egl.get(b"eglGetDisplay\0").ok()?;
+        let egl_get_platform_display: EglGetPlatformDisplay = egl
+            .get::<EglGetPlatformDisplay>(b"eglGetPlatformDisplay\0")
+            .or_else(|_| egl.get::<EglGetPlatformDisplay>(b"eglGetPlatformDisplayEXT\0"))
+            .map(|symbol| *symbol)
+            .ok()
+            .or_else(|| {
+                let egl_get_proc_address: EglGetProcAddress =
+                    *egl.get(b"eglGetProcAddress\0").ok()?;
+                let symbol = egl_get_proc_address(c"eglGetPlatformDisplayEXT".as_ptr());
+                (!symbol.is_null()).then(|| std::mem::transmute(symbol))
+            })?;
         let egl_initialize: EglInitialize = *egl.get(b"eglInitialize\0").ok()?;
         let egl_query_string: EglQueryString = *egl.get(b"eglQueryString\0").ok()?;
         let egl_terminate: EglTerminate = *egl.get(b"eglTerminate\0").ok()?;
@@ -354,7 +367,8 @@ fn wayland_egl_vendor_is_nvidia(wayland_display: Option<&str>) -> Option<bool> {
             return None;
         }
 
-        let egl_display = egl_get_display(wl_display);
+        let egl_display =
+            egl_get_platform_display(EGL_PLATFORM_WAYLAND_KHR, wl_display, std::ptr::null());
         if egl_display.is_null() {
             wl_display_disconnect(wl_display);
             return None;
