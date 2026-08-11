@@ -491,8 +491,20 @@ fn open_window(app_handle: &tauri::AppHandle, view: &str) {
         }
     }
 
-    let _ = app_handle.emit("open-window", serde_json::json!({ "view": view }));
-    if let Some(window) = app_handle.get_webview_window("main") {
+    let window = app_handle.get_webview_window("main");
+    // Whether this opens the window rather than refocusing one that is already
+    // up: the frontend treats a fresh open as a new session and a refocus as
+    // the same one continuing. A state we can't read counts as fresh, which
+    // only ever costs an auto-close.
+    let already_open = window
+        .as_ref()
+        .and_then(|w| w.is_visible().ok())
+        .unwrap_or(false);
+    let _ = app_handle.emit(
+        "open-window",
+        serde_json::json!({ "view": view, "fresh": !already_open }),
+    );
+    if let Some(window) = window {
         let _ = window.show();
         let _ = window.set_focus();
     }
@@ -903,6 +915,14 @@ fn fleet_is_clean(
 /// before reading: a re-check queued behind this one (another update terminal
 /// closing) must get to write its results first, or a host it is about to
 /// report as still pending would read as clean here.
+///
+/// The lock discipline deliberately stops at this function. `save_config` does
+/// not take `refresh_lock` — it is held for whole fleet scans, and blocking the
+/// Settings dialog on one would be a far worse trade than the remaining window
+/// here, where a settings save landing between these reads and the emit lets a
+/// close fire from the previous fleet's results. That emit can only hide the
+/// window when the Updates view is on screen, and saving those settings means
+/// being in the Settings view, so it costs nothing a user can see.
 async fn maybe_close_after_update(app_handle: &tauri::AppHandle) {
     let enabled = {
         let state = app_handle.state::<AppState>();
@@ -916,8 +936,10 @@ async fn maybe_close_after_update(app_handle: &tauri::AppHandle) {
     let tray_state = app_handle.state::<TrayState>();
     let _refresh_guard = tray_state.refresh_lock.lock().await;
     // A full scan takes the flag before it queues on the lock, so this also
-    // covers one that hasn't started yet: its results are the ones that matter,
-    // and it will emit its own state when it finishes.
+    // covers one that hasn't started yet: its results are the ones that matter.
+    // The close is dropped rather than deferred until that scan lands — a scan
+    // is usually a Check Now, and ending the refresh the user just asked for by
+    // dismissing the window would be worse than leaving it open.
     if tray_state.full_check_in_progress.load(Ordering::Acquire) {
         return;
     }

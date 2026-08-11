@@ -93,10 +93,12 @@
       } catch {}
     });
 
-    await listen<{ view: string }>("open-window", (event) => {
+    await listen<{ view: string; fresh?: boolean }>("open-window", (event) => {
       // A fresh open is a new session: an update launched before the window was
-      // last hidden must not close the window someone just asked for.
-      updateLaunched = false;
+      // last hidden must not close the window someone just asked for. A refocus
+      // of a window that's already up is the same session continuing, and the
+      // update running in it still owns the eventual close.
+      if (event.payload.fresh !== false) updateLaunched = false;
       previousView = currentView;
       currentView = event.payload.view as View;
     });
