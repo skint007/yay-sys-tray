@@ -101,17 +101,29 @@ fn nvidia_renderer_present() -> bool {
         .filter(|entry| is_drm_card(&entry.file_name().to_string_lossy()))
         .filter_map(|entry| read_drm_device(&entry.path()))
         .collect();
-    let nvidia_offload_requested = std::env::var("__NV_PRIME_RENDER_OFFLOAD")
+    let nvidia_renderer_requested = std::env::var("__NV_PRIME_RENDER_OFFLOAD")
         .is_ok_and(|value| !value.trim().is_empty() && value.trim() != "0")
         || std::env::var("__GLX_VENDOR_LIBRARY_NAME")
-            .is_ok_and(|value| value.eq_ignore_ascii_case("nvidia"));
+            .is_ok_and(|value| value.eq_ignore_ascii_case("nvidia"))
+        || std::env::var("__EGL_VENDOR_LIBRARY_FILENAMES")
+            .is_ok_and(|value| egl_vendor_list_selects_nvidia(&value));
     let compositor_card = selected_compositor_card();
 
     primary_renderer_is_nvidia(
         &devices,
         compositor_card.as_deref(),
-        nvidia_offload_requested,
+        nvidia_renderer_requested,
     )
+}
+
+fn egl_vendor_list_selects_nvidia(value: &str) -> bool {
+    value.split(':').any(|path| {
+        Path::new(path.trim()).file_name().is_some_and(|name| {
+            name.to_string_lossy()
+                .to_ascii_lowercase()
+                .contains("nvidia")
+        })
+    })
 }
 
 fn is_drm_card(name: &str) -> bool {
@@ -161,10 +173,10 @@ fn first_card_from_device_list(value: &str) -> Option<String> {
 fn primary_renderer_is_nvidia(
     devices: &[DrmDevice],
     compositor_card: Option<&str>,
-    nvidia_offload_requested: bool,
+    nvidia_renderer_requested: bool,
 ) -> bool {
     let nvidia_device_present = devices.iter().any(|device| device.nvidia_driver);
-    if nvidia_offload_requested {
+    if nvidia_renderer_requested {
         return nvidia_device_present;
     }
     if let Some(selected) = compositor_card {
@@ -182,8 +194,8 @@ fn primary_renderer_is_nvidia(
 #[cfg(test)]
 mod tests {
     use super::{
-        first_card_from_device_list, is_wayland_session, primary_renderer_is_nvidia,
-        should_disable_dmabuf, DrmDevice,
+        egl_vendor_list_selects_nvidia, first_card_from_device_list, is_wayland_session,
+        primary_renderer_is_nvidia, should_disable_dmabuf, DrmDevice,
     };
 
     fn device(card_name: &str, nvidia_driver: bool, boot_vga: bool) -> DrmDevice {
@@ -392,6 +404,16 @@ mod tests {
             &[device("card0", false, true), device("card1", true, false),],
             None,
             true,
+        ));
+    }
+
+    #[test]
+    fn glvnd_egl_vendor_file_can_select_nvidia() {
+        assert!(egl_vendor_list_selects_nvidia(
+            "/usr/share/glvnd/egl_vendor.d/10_nvidia.json"
+        ));
+        assert!(!egl_vendor_list_selects_nvidia(
+            "/usr/share/glvnd/egl_vendor.d/50_mesa.json"
         ));
     }
 
