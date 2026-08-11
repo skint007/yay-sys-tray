@@ -6420,11 +6420,13 @@ checksum = "ec7a2a501ed189703dba8b08142f057e887dfc4b2cc4db2d343ac6376ba3e0b9"
 
 [[package]]
 name = "yay-sys-tray"
-version = "1.5.0"
+version = "1.5.1"
 dependencies = [
  "chrono",
  "dirs",
  "ksni",
+ "libc",
+ "libloading",
  "log",
  "reqwest 0.12.28",
  "resvg",
