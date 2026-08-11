@@ -94,15 +94,6 @@
       previousView = currentView;
       currentView = event.payload.view as View;
     });
-
-    // "Close window after updating": the backend fires this only once an update
-    // run has left nothing pending. Ignore it unless the Updates screen is still
-    // on show — a Settings or About view the user opened while the terminal was
-    // running must not be yanked away from under them.
-    await listen("close-after-update", () => {
-      if (currentView !== "updates") return;
-      hideWindow();
-    });
     await emit("frontend-ready");
   });
 
@@ -117,15 +108,6 @@
     quitApp().catch(() => {});
   }
 
-  // Back to tray-only mode: drop the view state so the next open re-applies its
-  // size, then hide (a tray app never quits on close).
-  function hideWindow() {
-    previousView = null;
-    currentView = null;
-    appliedView = null;
-    getCurrentWindow().hide().catch(() => {});
-  }
-
   function closeDialog() {
     // Settings/About reached from the Updates window → go back there instead of
     // hiding; otherwise (opened directly from the tray) hide the window.
@@ -134,7 +116,10 @@
       previousView = null;
       return;
     }
-    hideWindow();
+    previousView = null;
+    currentView = null;
+    appliedView = null;
+    getCurrentWindow().hide().catch(() => {});
   }
 </script>
 

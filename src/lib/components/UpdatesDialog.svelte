@@ -281,6 +281,14 @@
         checking = false;
         loadResults();
       }),
+      // "Close window after updating". The backend fires this once an update run
+      // has left nothing pending anywhere; acting on it only when *this* dialog
+      // launched the update keeps it from dismissing a window the user opened
+      // again later, while an old terminal was still running.
+      listen("close-after-update", () => {
+        if (!launchedUpdate) return;
+        onclose();
+      }),
     ]);
   });
 
@@ -338,8 +346,13 @@
     p.catch((e) => console.error("remove failed:", e));
   }
 
+  // Whether an update was launched from this dialog — the only thing that may
+  // trigger the auto-close. Removals and plain re-checks never count.
+  let launchedUpdate = false;
+
   function runPrimary(restart: boolean) {
     primaryMenu = false;
+    launchedUpdate = true;
     const sel = activeSelected;
     if (sel.length > 0) {
       const p =
@@ -358,6 +371,7 @@
   }
 
   function runRemoteBulk() {
+    launchedUpdate = true;
     // Each host reboots only if it actually needs a restart (backend decides).
     runUpdateSelected(checkedHosts, true).catch(() => {});
   }

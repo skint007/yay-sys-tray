@@ -15,6 +15,11 @@ struct TermSpec {
     exec_flag: Option<&'static str>,
     /// Flag that keeps the window open after the command exits, if supported.
     hold_flag: Option<&'static str>,
+    /// Flag that makes the launcher stay alive until the command exits, for
+    /// client/server terminals whose CLI otherwise returns as soon as the
+    /// server owns the window. Without it the update looks finished the moment
+    /// it starts.
+    wait_flag: Option<&'static str>,
     /// Flag that sets the window title, if supported.
     title_flag: Option<&'static str>,
 }
@@ -25,24 +30,24 @@ struct TermSpec {
 /// doesn't accept makes it reject the whole command line and never launch.
 fn term_spec(terminal: &str) -> TermSpec {
     match terminal {
-        "kitty" => TermSpec { argv0: &["kitty"], exec_flag: None, hold_flag: Some("--hold"), title_flag: Some("--title") },
-        "konsole" => TermSpec { argv0: &["konsole"], exec_flag: Some("-e"), hold_flag: Some("--hold"), title_flag: None },
-        "alacritty" => TermSpec { argv0: &["alacritty"], exec_flag: Some("-e"), hold_flag: Some("--hold"), title_flag: Some("--title") },
-        "foot" => TermSpec { argv0: &["foot"], exec_flag: None, hold_flag: Some("--hold"), title_flag: Some("--title") },
-        "xterm" => TermSpec { argv0: &["xterm"], exec_flag: Some("-e"), hold_flag: Some("-hold"), title_flag: Some("-T") },
-        "xfce4-terminal" => TermSpec { argv0: &["xfce4-terminal"], exec_flag: Some("-x"), hold_flag: Some("--hold"), title_flag: Some("--title") },
+        "kitty" => TermSpec { argv0: &["kitty"], exec_flag: None, wait_flag: None, hold_flag: Some("--hold"), title_flag: Some("--title") },
+        "konsole" => TermSpec { argv0: &["konsole"], exec_flag: Some("-e"), wait_flag: None, hold_flag: Some("--hold"), title_flag: None },
+        "alacritty" => TermSpec { argv0: &["alacritty"], exec_flag: Some("-e"), wait_flag: None, hold_flag: Some("--hold"), title_flag: Some("--title") },
+        "foot" => TermSpec { argv0: &["foot"], exec_flag: None, wait_flag: None, hold_flag: Some("--hold"), title_flag: Some("--title") },
+        "xterm" => TermSpec { argv0: &["xterm"], exec_flag: Some("-e"), wait_flag: None, hold_flag: Some("-hold"), title_flag: Some("-T") },
+        "xfce4-terminal" => TermSpec { argv0: &["xfce4-terminal"], exec_flag: Some("-x"), wait_flag: None, hold_flag: Some("--hold"), title_flag: Some("--title") },
         // gnome-terminal/ptyxis/wezterm take the command after `--`; none has a
         // usable hold flag, so leave it off rather than break the launch.
-        "gnome-terminal" => TermSpec { argv0: &["gnome-terminal"], exec_flag: Some("--"), hold_flag: None, title_flag: None },
-        "ptyxis" => TermSpec { argv0: &["ptyxis"], exec_flag: Some("--"), hold_flag: None, title_flag: None },
-        "wezterm" => TermSpec { argv0: &["wezterm", "start"], exec_flag: Some("--"), hold_flag: None, title_flag: None },
-        _ => TermSpec { argv0: &[], exec_flag: Some("-e"), hold_flag: None, title_flag: None },
+        "gnome-terminal" => TermSpec { argv0: &["gnome-terminal"], exec_flag: Some("--"), wait_flag: Some("--wait"), hold_flag: None, title_flag: None },
+        "ptyxis" => TermSpec { argv0: &["ptyxis"], exec_flag: Some("--"), wait_flag: None, hold_flag: None, title_flag: None },
+        "wezterm" => TermSpec { argv0: &["wezterm", "start"], exec_flag: Some("--"), wait_flag: None, hold_flag: None, title_flag: None },
+        _ => TermSpec { argv0: &[], exec_flag: Some("-e"), wait_flag: None, hold_flag: None, title_flag: None },
     }
 }
 
 /// Build a terminal command prefix, optionally holding the window open and
-/// setting its title. Order: `program [hold] [title T] [exec_flag]` then the
-/// command the caller appends.
+/// setting its title. Order: `program [wait] [hold] [title T] [exec_flag]` then
+/// the command the caller appends.
 fn terminal_prefix(terminal: &str, title: Option<&str>, hold: bool) -> Vec<String> {
     let spec = term_spec(terminal);
     let mut out: Vec<String> = Vec::new();
@@ -54,6 +59,9 @@ fn terminal_prefix(terminal: &str, title: Option<&str>, hold: bool) -> Vec<Strin
         out.extend(spec.argv0.iter().map(|s| s.to_string()));
     }
 
+    if let Some(flag) = spec.wait_flag {
+        out.push(flag.to_string());
+    }
     if hold {
         if let Some(flag) = spec.hold_flag {
             out.push(flag.to_string());
@@ -432,6 +440,24 @@ mod tests {
         let cmd = remote_install_cmd(&selected, &selected, true);
         assert!(cmd.contains("sudo pacman -S a b --noconfirm"));
         assert!(!cmd.contains("skipping"));
+    }
+
+    #[test]
+    fn gnome_terminal_waits_for_the_command() {
+        // Its CLI hands the window to the terminal server and returns straight
+        // away otherwise, which would report the update as finished the moment
+        // it started.
+        let prefix = terminal_prefix("gnome-terminal", Some("Updating: local"), true);
+        assert_eq!(prefix, vec!["gnome-terminal", "--wait", "--"]);
+    }
+
+    #[test]
+    fn terminals_that_block_get_no_wait_flag() {
+        // A flag the terminal doesn't accept makes it reject the whole command
+        // line and never launch, so it goes only where it's known to exist.
+        let prefix = terminal_prefix("kitty", None, false);
+        assert_eq!(prefix, vec!["kitty"]);
+        assert!(!terminal_prefix("konsole", None, true).contains(&"--wait".to_string()));
     }
 
     #[test]

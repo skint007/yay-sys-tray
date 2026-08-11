@@ -804,6 +804,12 @@ async fn handle_update_finished(app_handle: tauri::AppHandle, scope: String, was
     }
 }
 
+/// Mark the stored remote results as no longer describing the configured fleet,
+/// so nothing treats them as a checked one until the next full scan.
+pub fn invalidate_remote_scan(tray_state: &TrayState) {
+    tray_state.remote_discovery_ok.store(false, Ordering::Release);
+}
+
 /// True when the latest results leave nothing to act on: every scan behind them
 /// succeeded (`scans_ok`), no updates are pending anywhere, no host errored and
 /// no AUR outage. Anything unknown deliberately counts as "not clean" — an empty
