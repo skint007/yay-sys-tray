@@ -5,11 +5,11 @@ use std::os::raw::{c_char, c_int, c_uint, c_void};
 use std::os::unix::fs::FileTypeExt;
 use std::path::Path;
 
-const RENDERER_OVERRIDES: [&str; 3] = [
+const WEBKIT_RENDERER_OVERRIDES: [&str; 2] = [
     "WEBKIT_DISABLE_DMABUF_RENDERER",
     "WEBKIT_DISABLE_COMPOSITING_MODE",
-    "__NV_DISABLE_EXPLICIT_SYNC",
 ];
+const NVIDIA_EXPLICIT_SYNC_OVERRIDE: &str = "__NV_DISABLE_EXPLICIT_SYNC";
 const COMPOSITOR_DRM_DEVICE_VARS: [&str; 3] =
     ["KWIN_DRM_DEVICES", "AQ_DRM_DEVICES", "WLR_DRM_DEVICES"];
 const WLR_RENDER_DRM_DEVICE: &str = "WLR_RENDER_DRM_DEVICE";
@@ -47,9 +47,7 @@ pub fn configure() -> bool {
         .flatten();
     let x11_display = std::env::var("DISPLAY").ok();
     let gdk_backend = std::env::var("GDK_BACKEND").ok();
-    let override_present = RENDERER_OVERRIDES
-        .iter()
-        .any(|name| std::env::var_os(name).is_some());
+    let override_present = renderer_override_present();
 
     if !should_disable_dmabuf(
         nvidia_renderer_present(wayland_display_for_probe, inherited_wayland_socket_present),
@@ -83,6 +81,23 @@ fn should_use_default_wayland_display(
     default_socket_available: bool,
 ) -> bool {
     wayland_display.is_none() && inherited_wayland_socket.is_none() && default_socket_available
+}
+
+fn renderer_override_present() -> bool {
+    WEBKIT_RENDERER_OVERRIDES
+        .iter()
+        .any(|name| webkit_renderer_override_enabled(std::env::var_os(name).as_deref()))
+        || nvidia_explicit_sync_override_enabled(
+            std::env::var(NVIDIA_EXPLICIT_SYNC_OVERRIDE).ok().as_deref(),
+        )
+}
+
+fn webkit_renderer_override_enabled(value: Option<&OsStr>) -> bool {
+    value.is_some_and(|value| value != OsStr::new("0"))
+}
+
+fn nvidia_explicit_sync_override_enabled(value: Option<&str>) -> bool {
+    value.is_some_and(|value| !value.trim().is_empty() && value.trim() != "0")
 }
 
 #[derive(Clone, Copy)]
@@ -523,12 +538,15 @@ fn primary_renderer_is_nvidia(
 
 #[cfg(test)]
 mod tests {
+    use std::ffi::OsStr;
+
     use super::{
         card_name_from_path_with_sysfs, default_wayland_socket_available,
         egl_vendor_list_selects_nvidia, first_available_card_from_device_list,
         first_card_from_device_list, is_wayland_session_with_probes, mixed_gpu_renderer_is_nvidia,
-        primary_renderer_is_nvidia, should_disable_dmabuf, should_disable_dmabuf_with_probes,
-        should_use_default_wayland_display, DrmDevice, SessionEnvironment,
+        nvidia_explicit_sync_override_enabled, primary_renderer_is_nvidia, should_disable_dmabuf,
+        should_disable_dmabuf_with_probes, should_use_default_wayland_display,
+        webkit_renderer_override_enabled, DrmDevice, SessionEnvironment,
     };
 
     fn device(card_name: &str, nvidia_driver: bool) -> DrmDevice {
@@ -618,6 +636,19 @@ mod tests {
         assert!(!should_use_default_wayland_display(Some(""), None, true));
         assert!(!should_use_default_wayland_display(None, Some(""), true));
         assert!(!should_use_default_wayland_display(None, None, false));
+    }
+
+    #[test]
+    fn renderer_overrides_only_apply_when_enabled() {
+        assert!(!webkit_renderer_override_enabled(None));
+        assert!(!webkit_renderer_override_enabled(Some(OsStr::new("0"))));
+        assert!(webkit_renderer_override_enabled(Some(OsStr::new(""))));
+        assert!(webkit_renderer_override_enabled(Some(OsStr::new("1"))));
+
+        assert!(!nvidia_explicit_sync_override_enabled(None));
+        assert!(!nvidia_explicit_sync_override_enabled(Some("")));
+        assert!(!nvidia_explicit_sync_override_enabled(Some("0")));
+        assert!(nvidia_explicit_sync_override_enabled(Some("1")));
     }
 
     #[test]
