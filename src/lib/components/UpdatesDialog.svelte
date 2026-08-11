@@ -382,22 +382,27 @@
     executePrimary(restart);
   }
 
-  async function confirmPartialUpdate(dontWarnAgain: boolean) {
+  function confirmPartialUpdate(dontWarnAgain: boolean) {
     const restart = pendingRestart;
     pendingRestart = null;
-    if (dontWarnAgain) {
-      warnPartialUpdates = false;
-      // Re-read before writing: the settings view shares this config file, so
-      // saving our stale copy would undo whatever was changed there.
-      try {
-        const cfg = await getConfig();
-        cfg.warn_partial_updates = false;
-        await saveConfig(cfg);
-      } catch (e) {
-        console.error("Failed to save partial-update warning preference:", e);
-      }
-    }
+    // Launch before persisting the preference: awaiting the config round-trip
+    // first would let a background re-check land in the gap and change the
+    // selection out from under the update the user just confirmed.
     if (restart !== null) executePrimary(restart);
+    if (dontWarnAgain) stopWarningAboutPartialUpdates();
+  }
+
+  async function stopWarningAboutPartialUpdates() {
+    warnPartialUpdates = false;
+    // Re-read before writing: the settings view shares this config file, so
+    // saving our stale copy would undo whatever was changed there.
+    try {
+      const cfg = await getConfig();
+      cfg.warn_partial_updates = false;
+      await saveConfig(cfg);
+    } catch (e) {
+      console.error("Failed to save partial-update warning preference:", e);
+    }
   }
 
   function executePrimary(restart: boolean) {
