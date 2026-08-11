@@ -35,6 +35,10 @@ pub struct TrayState {
     /// discovery leaves `remote_results` empty, which is indistinguishable from
     /// a fleet with no remote hosts unless it's recorded here.
     remote_discovery_ok: AtomicBool,
+    /// Whether the most recent local check succeeded. A failed one deliberately
+    /// leaves the previous `local_result` in place so the window still has
+    /// something to show, so the result alone can't say how current it is.
+    local_check_ok: AtomicBool,
     /// Rejects duplicate full scans before they can queue on `refresh_lock`.
     /// Targeted post-update refreshes still serialize through `refresh_lock`,
     /// but never count as a full scan for the tray click freshness window.
@@ -72,6 +76,7 @@ impl TrayState {
             linux_tray: Mutex::new(None),
             refresh_lock: tokio::sync::Mutex::new(()),
             remote_discovery_ok: AtomicBool::new(true),
+            local_check_ok: AtomicBool::new(true),
             full_check_in_progress: AtomicBool::new(false),
             window_open: Mutex::new(WindowOpenState::default()),
             anim_generation: AtomicU64::new(0),
@@ -708,6 +713,7 @@ async fn run_full_check(app_handle: tauri::AppHandle, fresh_for_minutes: Option<
                 && remote_hosts.iter().all(|host| host.error.is_none());
 
             *tray_state.local_result.write().await = Some(check_result.clone());
+            tray_state.local_check_ok.store(true, Ordering::Release);
             *tray_state.remote_results.write().await = remote_hosts.clone();
             // A failed AUR half deliberately still counts as fresh. The
             // periodic watchdog retries off `last_check_attempt`, so clearing
@@ -736,6 +742,7 @@ async fn run_full_check(app_handle: tauri::AppHandle, fresh_for_minutes: Option<
         }
         Err(err) => {
             log::error!("Update check failed: {err}");
+            tray_state.local_check_ok.store(false, Ordering::Release);
             // The remote scan already completed before the local check was
             // evaluated — keep its results so the Updates window can still show
             // remote hosts even though the local check errored.
@@ -797,17 +804,13 @@ async fn handle_update_finished(app_handle: tauri::AppHandle, scope: String, was
     }
 }
 
-/// True when the latest results leave nothing to act on: the tailnet was
-/// reachable, no updates are pending anywhere, no host errored and no AUR
-/// outage. Anything unknown deliberately counts as "not clean" — an empty
+/// True when the latest results leave nothing to act on: every scan behind them
+/// succeeded (`scans_ok`), no updates are pending anywhere, no host errored and
+/// no AUR outage. Anything unknown deliberately counts as "not clean" — an empty
 /// update list that only means "we couldn't look" is not an up-to-date system,
 /// and the warning is worth reading.
-fn fleet_is_clean(
-    local: Option<&CheckResult>,
-    remote: &[HostResult],
-    discovery_ok: bool,
-) -> bool {
-    if !discovery_ok {
+fn fleet_is_clean(local: Option<&CheckResult>, remote: &[HostResult], scans_ok: bool) -> bool {
+    if !scans_ok {
         return false;
     }
     let Some(local) = local else { return false };
@@ -851,8 +854,11 @@ async fn maybe_close_after_update(app_handle: &tauri::AppHandle) {
 
     let local = tray_state.local_result.read().await.clone();
     let remote = tray_state.remote_results.read().await.clone();
-    let discovery_ok = tray_state.remote_discovery_ok.load(Ordering::Acquire);
-    if !fleet_is_clean(local.as_ref(), &remote, discovery_ok) {
+    // A failed local check leaves the previous result in place, and a failed
+    // discovery leaves no remote results at all; neither may pass as clean.
+    let scans_ok = tray_state.remote_discovery_ok.load(Ordering::Acquire)
+        && tray_state.local_check_ok.load(Ordering::Acquire);
+    if !fleet_is_clean(local.as_ref(), &remote, scans_ok) {
         return;
     }
 
@@ -872,6 +878,7 @@ async fn recheck_local(app_handle: tauri::AppHandle) -> bool {
     match result {
         Ok(check_result) => {
             *tray_state.local_result.write().await = Some(check_result.clone());
+            tray_state.local_check_ok.store(true, Ordering::Release);
             let remote = tray_state.remote_results.read().await.clone();
             refresh_after_recheck(&app_handle, &check_result, &remote).await;
             let _ = app_handle.emit("check-complete", &check_result);
@@ -879,6 +886,7 @@ async fn recheck_local(app_handle: tauri::AppHandle) -> bool {
         }
         Err(err) => {
             log::error!("Local re-check failed: {err}");
+            tray_state.local_check_ok.store(false, Ordering::Release);
             *tray_state.last_full_check.write().await = None;
             let _ = app_handle.emit("check-error", &err);
             update_tray_error(&app_handle);

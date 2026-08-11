@@ -85,6 +85,17 @@ pub async fn discover_peers(tags: &[String]) -> Option<Vec<String>> {
         return None;
     };
 
+    // A stopped or logged-out tailnet answers with perfectly valid JSON and no
+    // peers at all, which would otherwise read as "this fleet has no remote
+    // hosts". An absent field is left alone: it means an unfamiliar output
+    // shape, and refusing to discover anything on that basis would be worse.
+    if let Some(state) = data.get("BackendState").and_then(|s| s.as_str()) {
+        if state != "Running" {
+            log::warn!("Tailscale backend is {state}, skipping peer discovery");
+            return None;
+        }
+    }
+
     let required_tags: Vec<String> = tags.iter().map(|t| format!("tag:{t}")).collect();
     let mut hostnames = Vec::new();
 
