@@ -32,11 +32,13 @@ pub fn configure() -> bool {
             .then(|| "wayland-0".to_string());
     let wayland_socket = inherited_wayland_socket
         .as_deref()
+        .filter(|value| !value.trim().is_empty())
         .or(default_wayland_display.as_deref());
     let wayland_display_for_probe = (!inherited_wayland_socket_present)
         .then_some(
             wayland_display
                 .as_deref()
+                .filter(|value| !value.trim().is_empty())
                 .or(default_wayland_display.as_deref()),
         )
         .flatten();
@@ -72,6 +74,15 @@ fn default_wayland_socket_available(runtime_dir: Option<&OsStr>) -> bool {
         .is_ok_and(|metadata| metadata.file_type().is_socket())
 }
 
+#[derive(Clone, Copy)]
+struct SessionEnvironment<'a> {
+    session_type: Option<&'a str>,
+    wayland_display: Option<&'a str>,
+    wayland_socket: Option<&'a str>,
+    x11_display: Option<&'a str>,
+    gdk_backend: Option<&'a str>,
+}
+
 fn should_disable_dmabuf(
     nvidia_renderer_present: bool,
     session_type: Option<&str>,
@@ -81,42 +92,45 @@ fn should_disable_dmabuf(
     gdk_backend: Option<&str>,
     override_present: bool,
 ) -> bool {
-    nvidia_renderer_present
-        && !override_present
-        && is_wayland_session(
+    should_disable_dmabuf_with_probes(
+        nvidia_renderer_present,
+        SessionEnvironment {
             session_type,
             wayland_display,
             wayland_socket,
             x11_display,
             gdk_backend,
-        )
+        },
+        override_present,
+        wayland_display_is_usable,
+        x11_display_is_usable,
+    )
 }
 
-fn is_wayland_session(
-    session_type: Option<&str>,
-    wayland_display: Option<&str>,
-    wayland_socket: Option<&str>,
-    x11_display: Option<&str>,
-    gdk_backend: Option<&str>,
+fn should_disable_dmabuf_with_probes(
+    nvidia_renderer_present: bool,
+    session: SessionEnvironment<'_>,
+    override_present: bool,
+    wayland_probe: impl Fn(Option<&str>, Option<&str>) -> bool,
+    x11_probe: impl Fn(Option<&str>) -> bool,
 ) -> bool {
-    is_wayland_session_with_x11_probe(
+    nvidia_renderer_present
+        && !override_present
+        && is_wayland_session_with_probes(session, wayland_probe, x11_probe)
+}
+
+fn is_wayland_session_with_probes(
+    session: SessionEnvironment<'_>,
+    wayland_probe: impl Fn(Option<&str>, Option<&str>) -> bool,
+    x11_probe: impl Fn(Option<&str>) -> bool,
+) -> bool {
+    let SessionEnvironment {
         session_type,
         wayland_display,
         wayland_socket,
         x11_display,
         gdk_backend,
-        x11_display_is_usable,
-    )
-}
-
-fn is_wayland_session_with_x11_probe(
-    session_type: Option<&str>,
-    wayland_display: Option<&str>,
-    wayland_socket: Option<&str>,
-    x11_display: Option<&str>,
-    gdk_backend: Option<&str>,
-    x11_probe: impl Fn(Option<&str>) -> bool,
-) -> bool {
+    } = session;
     let wayland_available = wayland_display.is_some_and(|value| !value.trim().is_empty())
         || wayland_socket.is_some_and(|value| !value.trim().is_empty())
         || session_type.is_some_and(|value| value.eq_ignore_ascii_case("wayland"));
@@ -126,7 +140,10 @@ fn is_wayland_session_with_x11_probe(
     if let Some(backends) = gdk_backend.filter(|value| !value.trim().is_empty()) {
         for backend in backends.split(',').map(str::trim) {
             if backend.eq_ignore_ascii_case("wayland") && wayland_available {
-                return true;
+                if wayland_probe(wayland_display, wayland_socket) {
+                    return true;
+                }
+                continue;
             }
             if backend.eq_ignore_ascii_case("x11") && x11_available {
                 if x11_probe(x11_display) {
@@ -135,13 +152,55 @@ fn is_wayland_session_with_x11_probe(
                 continue;
             }
             if backend == "*" {
-                return wayland_available;
+                return wayland_available && wayland_probe(wayland_display, wayland_socket);
             }
         }
         return false;
     }
 
-    wayland_available
+    wayland_available && wayland_probe(wayland_display, wayland_socket)
+}
+
+fn wayland_display_is_usable(wayland_display: Option<&str>, wayland_socket: Option<&str>) -> bool {
+    // GTK will consume an inherited socket directly. Opening or duplicating it
+    // here would share the protocol stream, so leave validation to GTK.
+    if std::env::var("WAYLAND_SOCKET").is_ok_and(|value| !value.trim().is_empty()) {
+        return true;
+    }
+
+    type WlDisplayConnect = unsafe extern "C" fn(*const c_char) -> *mut c_void;
+    type WlDisplayDisconnect = unsafe extern "C" fn(*mut c_void);
+
+    // SAFETY: The symbols use libwayland-client's C ABI, the library outlives
+    // the copied function pointers, and a successful connection is closed once.
+    unsafe {
+        let wayland = match libloading::Library::new("libwayland-client.so.0") {
+            Ok(wayland) => wayland,
+            Err(_) => return false,
+        };
+        let Ok(wl_display_connect) = wayland.get::<WlDisplayConnect>(b"wl_display_connect\0")
+        else {
+            return false;
+        };
+        let Ok(wl_display_disconnect) =
+            wayland.get::<WlDisplayDisconnect>(b"wl_display_disconnect\0")
+        else {
+            return false;
+        };
+        let display_name = wayland_display
+            .filter(|value| !value.trim().is_empty())
+            .or_else(|| wayland_socket.filter(|value| !value.trim().is_empty()));
+        let display_name = display_name.and_then(|value| CString::new(value).ok());
+        let display_name_ptr = display_name
+            .as_ref()
+            .map_or(std::ptr::null(), |value| value.as_ptr());
+        let display = wl_display_connect(display_name_ptr);
+        if display.is_null() {
+            return false;
+        }
+        wl_display_disconnect(display);
+        true
+    }
 }
 
 fn x11_display_is_usable(display: Option<&str>) -> bool {
@@ -444,8 +503,9 @@ mod tests {
     use super::{
         card_name_from_path_with_sysfs, default_wayland_socket_available,
         egl_vendor_list_selects_nvidia, first_available_card_from_device_list,
-        first_card_from_device_list, is_wayland_session, is_wayland_session_with_x11_probe,
-        mixed_gpu_renderer_is_nvidia, primary_renderer_is_nvidia, should_disable_dmabuf, DrmDevice,
+        first_card_from_device_list, is_wayland_session_with_probes, mixed_gpu_renderer_is_nvidia,
+        primary_renderer_is_nvidia, should_disable_dmabuf, should_disable_dmabuf_with_probes,
+        DrmDevice, SessionEnvironment,
     };
 
     fn device(card_name: &str, nvidia_driver: bool) -> DrmDevice {
@@ -455,40 +515,50 @@ mod tests {
         }
     }
 
+    fn session<'a>(
+        session_type: Option<&'a str>,
+        wayland_display: Option<&'a str>,
+        wayland_socket: Option<&'a str>,
+        x11_display: Option<&'a str>,
+        gdk_backend: Option<&'a str>,
+    ) -> SessionEnvironment<'a> {
+        SessionEnvironment {
+            session_type,
+            wayland_display,
+            wayland_socket,
+            x11_display,
+            gdk_backend,
+        }
+    }
+
     #[test]
     fn disables_dmabuf_for_nvidia_wayland_session() {
-        assert!(should_disable_dmabuf(
+        assert!(should_disable_dmabuf_with_probes(
             true,
-            Some("wayland"),
-            Some("wayland-0"),
-            None,
-            None,
-            None,
+            session(Some("wayland"), Some("wayland-0"), None, None, None),
             false,
+            |_, _| true,
+            |_| false,
         ));
     }
 
     #[test]
     fn wayland_display_is_enough_when_session_type_is_missing() {
-        assert!(should_disable_dmabuf(
+        assert!(should_disable_dmabuf_with_probes(
             true,
-            None,
-            Some("wayland-0"),
-            None,
-            None,
-            None,
+            session(None, Some("wayland-0"), None, None, None),
             false,
+            |_, _| true,
+            |_| false,
         ));
     }
 
     #[test]
     fn wayland_socket_is_enough_for_explicit_wayland_backend() {
-        assert!(is_wayland_session(
-            None,
-            None,
-            Some("7"),
-            None,
-            Some("wayland")
+        assert!(is_wayland_session_with_probes(
+            session(None, None, Some("7"), None, Some("wayland")),
+            |_, _| true,
+            |_| false,
         ));
     }
 
@@ -521,75 +591,108 @@ mod tests {
 
     #[test]
     fn explicit_wayland_gdk_backend_takes_precedence() {
-        assert!(should_disable_dmabuf(
+        assert!(should_disable_dmabuf_with_probes(
             true,
-            Some("x11"),
-            Some("wayland-0"),
-            None,
-            Some(":0"),
-            Some("wayland,x11"),
+            session(
+                Some("x11"),
+                Some("wayland-0"),
+                None,
+                Some(":0"),
+                Some("wayland,x11"),
+            ),
             false,
+            |_, _| true,
+            |_| true,
         ));
     }
 
     #[test]
     fn explicit_x11_gdk_backend_skips_wayland_workaround() {
-        assert!(!is_wayland_session_with_x11_probe(
-            Some("wayland"),
-            Some("wayland-0"),
-            None,
-            Some(":0"),
-            Some("x11"),
+        assert!(!is_wayland_session_with_probes(
+            session(
+                Some("wayland"),
+                Some("wayland-0"),
+                None,
+                Some(":0"),
+                Some("x11"),
+            ),
+            |_, _| true,
             |_| true,
         ));
     }
 
     #[test]
     fn wayland_fallback_is_treated_as_available() {
-        assert!(is_wayland_session_with_x11_probe(
-            Some("wayland"),
-            Some("wayland-0"),
-            None,
-            Some(":0"),
-            Some("x11,wayland"),
+        assert!(is_wayland_session_with_probes(
+            session(
+                Some("wayland"),
+                Some("wayland-0"),
+                None,
+                Some(":0"),
+                Some("x11,wayland"),
+            ),
+            |_, _| true,
             |_| false,
         ));
-        assert!(is_wayland_session(
-            Some("wayland"),
-            Some("wayland-0"),
-            None,
-            Some(":0"),
-            Some("wayland,x11"),
+        assert!(is_wayland_session_with_probes(
+            session(
+                Some("wayland"),
+                Some("wayland-0"),
+                None,
+                Some(":0"),
+                Some("wayland,x11"),
+            ),
+            |_, _| true,
+            |_| true,
         ));
     }
 
     #[test]
     fn first_usable_gdk_backend_takes_precedence() {
-        assert!(!is_wayland_session_with_x11_probe(
-            Some("wayland"),
-            Some("wayland-0"),
-            None,
-            Some(":0"),
-            Some("x11,wayland"),
+        assert!(!is_wayland_session_with_probes(
+            session(
+                Some("wayland"),
+                Some("wayland-0"),
+                None,
+                Some(":0"),
+                Some("x11,wayland"),
+            ),
+            |_, _| true,
+            |_| true,
+        ));
+    }
+
+    #[test]
+    fn unavailable_wayland_backend_falls_back_to_usable_x11() {
+        assert!(!is_wayland_session_with_probes(
+            session(
+                Some("wayland"),
+                Some("wayland-stale"),
+                None,
+                Some(":0"),
+                Some("wayland,x11"),
+            ),
+            |_, _| false,
             |_| true,
         ));
     }
 
     #[test]
     fn wildcard_gdk_backend_uses_wayland_session_indicators() {
-        assert!(is_wayland_session(
-            Some("wayland"),
-            Some("wayland-0"),
-            None,
-            Some(":0"),
-            Some("*")
+        assert!(is_wayland_session_with_probes(
+            session(
+                Some("wayland"),
+                Some("wayland-0"),
+                None,
+                Some(":0"),
+                Some("*"),
+            ),
+            |_, _| true,
+            |_| true,
         ));
-        assert!(!is_wayland_session_with_x11_probe(
-            Some("x11"),
-            None,
-            None,
-            Some(":0"),
-            Some("x11,*"),
+        assert!(!is_wayland_session_with_probes(
+            session(Some("x11"), None, None, Some(":0"), Some("x11,*")),
+            |_, _| false,
             |_| true,
         ));
     }
