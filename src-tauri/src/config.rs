@@ -25,6 +25,8 @@ pub struct AppConfig {
     pub hold_terminal: bool,
     #[serde(default)]
     pub autostart: bool,
+    #[serde(default)]
+    pub close_after_update: bool,
     #[serde(default = "default_true")]
     pub animations: bool,
     #[serde(default)]
@@ -68,6 +70,7 @@ impl Default for AppConfig {
             noconfirm: false,
             hold_terminal: true,
             autostart: false,
+            close_after_update: false,
             animations: true,
             theme: "default".into(),
             passwordless_updates: false,

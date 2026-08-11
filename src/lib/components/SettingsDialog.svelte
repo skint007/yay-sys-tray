@@ -146,6 +146,14 @@
           </div>
           <div class="div"></div>
           <div class="trow">
+            <div class="block">
+              <div class="row-title">Close window after updating</div>
+              <div class="row-desc">Only when nothing is left to update</div>
+            </div>
+            <ToggleSwitch bind:checked={config.close_after_update} />
+          </div>
+          <div class="div"></div>
+          <div class="trow">
             <div class="block"><div class="row-title">Animate tray icon</div></div>
             <ToggleSwitch bind:checked={config.animations} />
           </div>

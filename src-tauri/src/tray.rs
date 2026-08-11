@@ -762,14 +762,60 @@ async fn handle_update_finished(app_handle: tauri::AppHandle, scope: String) {
             let _ = crate::system::restart_service().await;
             return;
         }
-        recheck_local(app_handle).await;
-    } else {
-        recheck_remote(app_handle, scope).await;
+        if !recheck_local(app_handle.clone()).await {
+            return;
+        }
+    } else if !recheck_remote(app_handle.clone(), scope).await {
+        return;
     }
+
+    maybe_close_after_update(&app_handle).await;
+}
+
+/// True when the latest results leave nothing to act on: no pending updates
+/// anywhere, no unreachable host and no AUR outage. Errors deliberately count as
+/// "not clean" — an empty update list that only means "we couldn't look" is not
+/// an up-to-date system, and the warning is worth reading.
+fn fleet_is_clean(local: Option<&CheckResult>, remote: &[HostResult]) -> bool {
+    let Some(local) = local else { return false };
+    if !local.updates.is_empty() || local.aur_error.is_some() {
+        return false;
+    }
+    remote
+        .iter()
+        .all(|h| h.updates.is_empty() && h.error.is_none() && h.aur_error.is_none())
+}
+
+/// Ask the window to hide once an update run has left the system clean.
+///
+/// Opt-in via `close_after_update`, and only reachable from the post-update
+/// re-check, so simply opening the app on an up-to-date system never dismisses
+/// it. The frontend does the hiding: it knows whether the user is still looking
+/// at the Updates screen the update was started from.
+async fn maybe_close_after_update(app_handle: &tauri::AppHandle) {
+    let enabled = {
+        let state = app_handle.state::<AppState>();
+        let config = state.config.read().await;
+        config.close_after_update
+    };
+    if !enabled {
+        return;
+    }
+
+    let tray_state = app_handle.state::<TrayState>();
+    let local = tray_state.local_result.read().await.clone();
+    let remote = tray_state.remote_results.read().await.clone();
+    if !fleet_is_clean(local.as_ref(), &remote) {
+        return;
+    }
+
+    log::info!("Nothing left to update, closing the window");
+    let _ = app_handle.emit("close-after-update", ());
 }
 
 /// Re-run the local check and refresh the tray, leaving remote results intact.
-async fn recheck_local(app_handle: tauri::AppHandle) {
+/// Returns whether the re-check succeeded.
+async fn recheck_local(app_handle: tauri::AppHandle) -> bool {
     log::info!("Re-checking local system after update");
     // Serialize with concurrent checks/re-checks (a burst of closing terminals).
     let refresh_state = app_handle.state::<TrayState>();
@@ -782,18 +828,21 @@ async fn recheck_local(app_handle: tauri::AppHandle) {
             let remote = tray_state.remote_results.read().await.clone();
             refresh_after_recheck(&app_handle, &check_result, &remote).await;
             let _ = app_handle.emit("check-complete", &check_result);
+            true
         }
         Err(err) => {
             log::error!("Local re-check failed: {err}");
             *tray_state.last_full_check.write().await = None;
             let _ = app_handle.emit("check-error", &err);
             update_tray_error(&app_handle);
+            false
         }
     }
 }
 
 /// Re-check a single remote host and refresh, leaving local + other hosts intact.
-async fn recheck_remote(app_handle: tauri::AppHandle, hostname: String) {
+/// Returns whether the re-check succeeded.
+async fn recheck_remote(app_handle: tauri::AppHandle, hostname: String) -> bool {
     log::info!("Re-checking remote host {hostname} after update");
     // Serialize with concurrent checks/re-checks (a burst of closing terminals).
     let refresh_state = app_handle.state::<TrayState>();
@@ -834,6 +883,8 @@ async fn recheck_remote(app_handle: tauri::AppHandle, hostname: String) {
         refresh_after_recheck(&app_handle, &local, &remote).await;
     }
     let _ = app_handle.emit("check-complete", serde_json::json!({}));
+
+    !recheck_failed
 }
 
 /// Recompute the tray icon/tooltip + menu from the given local & remote state.
@@ -1140,7 +1191,8 @@ fn start_bounce_animation(
 
 #[cfg(test)]
 mod tests {
-    use super::check_is_fresh;
+    use super::{check_is_fresh, fleet_is_clean, CheckResult, HostResult};
+    use crate::checker::UpdateInfo;
     use chrono::{Duration, Local, TimeZone};
 
     #[cfg(target_os = "linux")]
@@ -1165,6 +1217,74 @@ mod tests {
     #[test]
     fn check_at_interval_boundary_is_stale() {
         assert!(!check_is_fresh(Some(now() - Duration::minutes(60)), now(), 60));
+    }
+
+    fn update(package: &str) -> UpdateInfo {
+        UpdateInfo {
+            package: package.to_string(),
+            old_version: "1.0-1".to_string(),
+            new_version: "1.1-1".to_string(),
+            description: String::new(),
+            repository: "extra".to_string(),
+            url: String::new(),
+        }
+    }
+
+    fn local(updates: Vec<UpdateInfo>) -> CheckResult {
+        CheckResult {
+            updates,
+            needs_restart: false,
+            restart_packages: Vec::new(),
+            reboot_info: None,
+            aur_error: None,
+        }
+    }
+
+    fn host(hostname: &str, updates: Vec<UpdateInfo>) -> HostResult {
+        HostResult {
+            hostname: hostname.to_string(),
+            updates,
+            needs_restart: false,
+            restart_packages: Vec::new(),
+            error: None,
+            aur_error: None,
+        }
+    }
+
+    #[test]
+    fn nothing_pending_anywhere_is_clean() {
+        assert!(fleet_is_clean(Some(&local(vec![])), &[host("arch-serv", vec![])]));
+    }
+
+    #[test]
+    fn pending_updates_are_not_clean() {
+        assert!(!fleet_is_clean(Some(&local(vec![update("jq")])), &[]));
+        assert!(!fleet_is_clean(
+            Some(&local(vec![])),
+            &[host("arch-serv", vec![update("jq")])]
+        ));
+    }
+
+    #[test]
+    fn a_check_that_never_ran_is_not_clean() {
+        assert!(!fleet_is_clean(None, &[]));
+    }
+
+    #[test]
+    fn errors_keep_the_window_open() {
+        // An empty update list that only means "we couldn't look" must not read
+        // as an up-to-date system.
+        let mut unreachable = host("arch-serv", vec![]);
+        unreachable.error = Some("ssh: connect timed out".to_string());
+        assert!(!fleet_is_clean(Some(&local(vec![])), &[unreachable]));
+
+        let mut aur_down = local(vec![]);
+        aur_down.aur_error = Some("AUR unreachable".to_string());
+        assert!(!fleet_is_clean(Some(&aur_down), &[]));
+
+        let mut host_aur_down = host("arch-serv", vec![]);
+        host_aur_down.aur_error = Some("AUR unreachable".to_string());
+        assert!(!fleet_is_clean(Some(&local(vec![])), &[host_aur_down]));
     }
 
     #[cfg(target_os = "linux")]
