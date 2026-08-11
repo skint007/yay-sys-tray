@@ -625,14 +625,8 @@ async fn run_full_check(app_handle: tauri::AppHandle, fresh_for_minutes: Option<
     log::info!("Starting update check");
     *refresh_state.last_check_attempt.write().await = Some(chrono::Local::now());
 
-    // Read alongside the config this scan will run under, so results that land
-    // after the remote settings changed can be recognised as describing a fleet
-    // that is no longer the configured one.
-    let scan_generation = refresh_state
-        .remote_config_generation
-        .load(Ordering::Acquire);
-
     let (
+        scan_generation,
         animations_enabled,
         notify_mode,
         tailscale_enabled,
@@ -643,6 +637,14 @@ async fn run_full_check(app_handle: tauri::AppHandle, fresh_for_minutes: Option<
         let state = app_handle.state::<AppState>();
         let config = state.config.read().await;
         (
+            // Taken under the same lock as the settings this scan will run
+            // under: `save_config` invalidates while holding the write lock, so
+            // the generation and the settings can never come from opposite
+            // sides of a settings change. A scan recorded under a generation it
+            // didn't actually run under would have its results thrown away.
+            refresh_state
+                .remote_config_generation
+                .load(Ordering::Acquire),
             config.animations,
             config.notify.clone(),
             config.tailscale_enabled,

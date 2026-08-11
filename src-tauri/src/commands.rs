@@ -28,6 +28,9 @@ pub async fn save_config(
     let remote_config_changed = config.tailscale_enabled != current.tailscale_enabled
         || config.tailscale_tags != current.tailscale_tags
         || config.tailscale_ssh_user != current.tailscale_ssh_user;
+    // Invalidated while the config write lock is held, so a scan reading the
+    // generation under the read lock always gets the generation belonging to
+    // the settings it is about to scan with.
     if remote_config_changed {
         tray::invalidate_remote_scan(&tray_state);
     }
