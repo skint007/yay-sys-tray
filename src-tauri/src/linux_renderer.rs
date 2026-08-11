@@ -1,6 +1,8 @@
 //! Linux WebKitGTK renderer compatibility workarounds.
 
-use std::ffi::OsStr;
+use std::ffi::{CStr, CString, OsStr};
+use std::os::fd::{BorrowedFd, IntoRawFd};
+use std::os::raw::{c_char, c_int, c_void};
 use std::os::unix::fs::FileTypeExt;
 use std::path::Path;
 
@@ -21,10 +23,16 @@ const COMPOSITOR_DRM_DEVICE_VARS: [&str; 3] =
 pub fn configure() -> bool {
     let session_type = std::env::var("XDG_SESSION_TYPE").ok();
     let wayland_display = std::env::var("WAYLAND_DISPLAY").ok();
-    let wayland_socket = std::env::var("WAYLAND_SOCKET").ok().or_else(|| {
+    let inherited_wayland_socket = std::env::var("WAYLAND_SOCKET").ok();
+    let default_wayland_display =
         default_wayland_socket_available(std::env::var_os("XDG_RUNTIME_DIR").as_deref())
-            .then(|| "wayland-0".to_string())
-    });
+            .then(|| "wayland-0".to_string());
+    let wayland_socket = inherited_wayland_socket
+        .as_deref()
+        .or(default_wayland_display.as_deref());
+    let wayland_display_for_probe = wayland_display
+        .as_deref()
+        .or(default_wayland_display.as_deref());
     let x11_display = std::env::var("DISPLAY").ok();
     let gdk_backend = std::env::var("GDK_BACKEND").ok();
     let override_present = RENDERER_OVERRIDES
@@ -32,10 +40,13 @@ pub fn configure() -> bool {
         .any(|name| std::env::var_os(name).is_some());
 
     if !should_disable_dmabuf(
-        nvidia_renderer_present(),
+        nvidia_renderer_present(
+            wayland_display_for_probe,
+            inherited_wayland_socket.as_deref(),
+        ),
         session_type.as_deref(),
         wayland_display.as_deref(),
-        wayland_socket.as_deref(),
+        wayland_socket,
         x11_display.as_deref(),
         gdk_backend.as_deref(),
         override_present,
@@ -96,7 +107,7 @@ fn is_wayland_session(
                 return true;
             }
             if backend.eq_ignore_ascii_case("x11") && x11_available {
-                return false;
+                continue;
             }
             if backend == "*" {
                 return wayland_available;
@@ -112,11 +123,12 @@ fn is_wayland_session(
 struct DrmDevice {
     card_name: String,
     nvidia_driver: bool,
-    boot_display: bool,
-    boot_vga: bool,
 }
 
-fn nvidia_renderer_present() -> bool {
+fn nvidia_renderer_present(
+    wayland_display: Option<&str>,
+    inherited_wayland_socket: Option<&str>,
+) -> bool {
     let Ok(entries) = std::fs::read_dir("/sys/class/drm") else {
         return false;
     };
@@ -133,11 +145,18 @@ fn nvidia_renderer_present() -> bool {
         || std::env::var("__EGL_VENDOR_LIBRARY_FILENAMES")
             .is_ok_and(|value| egl_vendor_list_selects_nvidia(&value));
     let compositor_card = selected_compositor_card(&devices);
+    let mixed_gpu_system = devices.iter().any(|device| device.nvidia_driver)
+        && devices.iter().any(|device| !device.nvidia_driver);
+    let active_egl_renderer =
+        (mixed_gpu_system && compositor_card.is_none() && !nvidia_renderer_requested)
+            .then(|| wayland_egl_vendor_is_nvidia(wayland_display, inherited_wayland_socket))
+            .flatten();
 
     primary_renderer_is_nvidia(
         &devices,
         compositor_card.as_deref(),
         nvidia_renderer_requested,
+        active_egl_renderer,
     )
 }
 
@@ -174,6 +193,78 @@ fn egl_vendor_manifest_selects_nvidia(path: &str) -> bool {
     })
 }
 
+/// Ask EGL which vendor it selects for a fresh connection to this Wayland
+/// display. This matches the renderer WebKitGTK will use more closely than PCI
+/// firmware flags do on hybrid-GPU systems.
+fn wayland_egl_vendor_is_nvidia(
+    wayland_display: Option<&str>,
+    inherited_wayland_socket: Option<&str>,
+) -> Option<bool> {
+    type WlDisplayConnect = unsafe extern "C" fn(*const c_char) -> *mut c_void;
+    type WlDisplayConnectToFd = unsafe extern "C" fn(c_int) -> *mut c_void;
+    type WlDisplayDisconnect = unsafe extern "C" fn(*mut c_void);
+    type EglGetDisplay = unsafe extern "C" fn(*mut c_void) -> *mut c_void;
+    type EglInitialize = unsafe extern "C" fn(*mut c_void, *mut c_int, *mut c_int) -> c_int;
+    type EglQueryString = unsafe extern "C" fn(*mut c_void, c_int) -> *const c_char;
+    type EglTerminate = unsafe extern "C" fn(*mut c_void) -> c_int;
+
+    const EGL_VENDOR: c_int = 0x3053;
+
+    // SAFETY: Every symbol is loaded from the library that defines its C ABI.
+    // The Wayland and EGL handles stay alive until all copied function pointers
+    // have been called, and every successfully-created display is released.
+    unsafe {
+        let wayland = libloading::Library::new("libwayland-client.so.0").ok()?;
+        let egl = libloading::Library::new("libEGL.so.1").ok()?;
+        let wl_display_connect: WlDisplayConnect = *wayland.get(b"wl_display_connect\0").ok()?;
+        let wl_display_connect_to_fd: WlDisplayConnectToFd =
+            *wayland.get(b"wl_display_connect_to_fd\0").ok()?;
+        let wl_display_disconnect: WlDisplayDisconnect =
+            *wayland.get(b"wl_display_disconnect\0").ok()?;
+        let egl_get_display: EglGetDisplay = *egl.get(b"eglGetDisplay\0").ok()?;
+        let egl_initialize: EglInitialize = *egl.get(b"eglInitialize\0").ok()?;
+        let egl_query_string: EglQueryString = *egl.get(b"eglQueryString\0").ok()?;
+        let egl_terminate: EglTerminate = *egl.get(b"eglTerminate\0").ok()?;
+
+        let wl_display = if let Some(socket) = inherited_wayland_socket {
+            let raw_fd = socket.parse::<c_int>().ok().filter(|fd| *fd >= 0)?;
+            let owned_fd = BorrowedFd::borrow_raw(raw_fd).try_clone_to_owned().ok()?;
+            wl_display_connect_to_fd(owned_fd.into_raw_fd())
+        } else {
+            let display_name = CString::new(wayland_display?).ok()?;
+            wl_display_connect(display_name.as_ptr())
+        };
+        if wl_display.is_null() {
+            return None;
+        }
+
+        let egl_display = egl_get_display(wl_display);
+        if egl_display.is_null() {
+            wl_display_disconnect(wl_display);
+            return None;
+        }
+
+        let mut major = 0;
+        let mut minor = 0;
+        if egl_initialize(egl_display, &mut major, &mut minor) == 0 {
+            wl_display_disconnect(wl_display);
+            return None;
+        }
+
+        let vendor = egl_query_string(egl_display, EGL_VENDOR);
+        let selected_nvidia = (!vendor.is_null()).then(|| {
+            CStr::from_ptr(vendor)
+                .to_string_lossy()
+                .to_ascii_lowercase()
+                .contains("nvidia")
+        });
+
+        egl_terminate(egl_display);
+        wl_display_disconnect(wl_display);
+        selected_nvidia
+    }
+}
+
 fn is_drm_card(name: &str) -> bool {
     name.strip_prefix("card").is_some_and(|suffix| {
         !suffix.is_empty() && suffix.bytes().all(|byte| byte.is_ascii_digit())
@@ -191,10 +282,6 @@ fn read_drm_device(card_path: &Path) -> Option<DrmDevice> {
         card_name: card_path.file_name()?.to_string_lossy().into_owned(),
         nvidia_driver: vendor.trim().eq_ignore_ascii_case("0x10de")
             && driver.as_deref().is_some_and(|name| name == "nvidia"),
-        boot_display: std::fs::read_to_string(card_path.join("boot_display"))
-            .is_ok_and(|value| value.trim() == "1"),
-        boot_vga: std::fs::read_to_string(device_path.join("boot_vga"))
-            .is_ok_and(|value| value.trim() == "1"),
     })
 }
 
@@ -252,6 +339,7 @@ fn primary_renderer_is_nvidia(
     devices: &[DrmDevice],
     compositor_card: Option<&str>,
     nvidia_renderer_requested: bool,
+    active_egl_renderer: Option<bool>,
 ) -> bool {
     let nvidia_device_present = devices.iter().any(|device| device.nvidia_driver);
     if nvidia_renderer_requested {
@@ -263,20 +351,13 @@ fn primary_renderer_is_nvidia(
         }
     }
 
-    let boot_display_available = devices.iter().any(|device| device.boot_display);
-    let primary_device_is_nvidia = if boot_display_available {
-        devices
-            .iter()
-            .any(|device| device.boot_display && device.nvidia_driver)
-    } else {
-        devices
-            .iter()
-            .any(|device| device.boot_vga && device.nvidia_driver)
-    };
-
     let all_devices_are_nvidia =
         !devices.is_empty() && devices.iter().all(|device| device.nvidia_driver);
-    primary_device_is_nvidia || all_devices_are_nvidia
+    if all_devices_are_nvidia {
+        return true;
+    }
+
+    active_egl_renderer.is_some_and(|nvidia| nvidia && nvidia_device_present)
 }
 
 #[cfg(test)]
@@ -287,19 +368,10 @@ mod tests {
         primary_renderer_is_nvidia, should_disable_dmabuf, DrmDevice,
     };
 
-    fn device(card_name: &str, nvidia_driver: bool, boot_vga: bool) -> DrmDevice {
+    fn device(card_name: &str, nvidia_driver: bool) -> DrmDevice {
         DrmDevice {
             card_name: card_name.to_string(),
             nvidia_driver,
-            boot_display: false,
-            boot_vga,
-        }
-    }
-
-    fn boot_display_device(card_name: &str, nvidia_driver: bool, boot_vga: bool) -> DrmDevice {
-        DrmDevice {
-            boot_display: true,
-            ..device(card_name, nvidia_driver, boot_vga)
         }
     }
 
@@ -394,8 +466,8 @@ mod tests {
     }
 
     #[test]
-    fn first_available_gdk_backend_takes_precedence() {
-        assert!(!is_wayland_session(
+    fn wayland_fallback_is_treated_as_available() {
+        assert!(is_wayland_session(
             Some("wayland"),
             Some("wayland-0"),
             None,
@@ -471,65 +543,50 @@ mod tests {
     #[test]
     fn sole_nvidia_device_is_the_renderer() {
         assert!(primary_renderer_is_nvidia(
-            &[device("card0", true, false)],
+            &[device("card0", true)],
             None,
             false,
+            None,
         ));
     }
 
     #[test]
-    fn primary_nvidia_device_is_the_renderer_on_multi_gpu_system() {
+    fn active_nvidia_egl_vendor_is_the_renderer_on_multi_gpu_system() {
         assert!(primary_renderer_is_nvidia(
-            &[device("card0", true, true), device("card1", false, false),],
+            &[device("card0", true), device("card1", false)],
             None,
             false,
-        ));
-    }
-
-    #[test]
-    fn boot_display_takes_precedence_over_boot_vga() {
-        assert!(primary_renderer_is_nvidia(
-            &[
-                boot_display_device("card0", true, false),
-                device("card1", false, true),
-            ],
-            None,
-            false,
-        ));
-        assert!(!primary_renderer_is_nvidia(
-            &[
-                device("card0", true, true),
-                boot_display_device("card1", false, false),
-            ],
-            None,
-            false,
+            Some(true),
         ));
     }
 
     #[test]
     fn secondary_nvidia_device_does_not_trigger_workaround() {
         assert!(!primary_renderer_is_nvidia(
-            &[device("card0", false, true), device("card1", true, false),],
+            &[device("card0", false), device("card1", true)],
             None,
             false,
+            Some(false),
         ));
     }
 
     #[test]
     fn unmarked_multi_gpu_nvidia_system_triggers_workaround() {
         assert!(primary_renderer_is_nvidia(
-            &[device("card0", true, false), device("card1", true, false)],
+            &[device("card0", true), device("card1", true)],
             None,
             false,
+            None,
         ));
     }
 
     #[test]
     fn compositor_can_select_secondary_nvidia_device() {
         assert!(primary_renderer_is_nvidia(
-            &[device("card0", false, true), device("card1", true, false),],
+            &[device("card0", false), device("card1", true)],
             Some("card1"),
             false,
+            Some(false),
         ));
     }
 
@@ -547,7 +604,7 @@ mod tests {
         assert_eq!(
             first_available_card_from_device_list(
                 "/dev/dri/card9:/dev/dri/card1",
-                &[device("card0", false, true), device("card1", true, false)]
+                &[device("card0", false), device("card1", true)]
             )
             .as_deref(),
             Some("card1")
@@ -579,18 +636,20 @@ mod tests {
     #[test]
     fn compositor_can_select_secondary_integrated_device() {
         assert!(!primary_renderer_is_nvidia(
-            &[device("card0", true, true), device("card1", false, false),],
+            &[device("card0", true), device("card1", false)],
             Some("card1"),
             false,
+            Some(true),
         ));
     }
 
     #[test]
     fn nvidia_offload_selects_secondary_nvidia_device() {
         assert!(primary_renderer_is_nvidia(
-            &[device("card0", false, true), device("card1", true, false),],
+            &[device("card0", false), device("card1", true)],
             None,
             true,
+            Some(false),
         ));
     }
 
@@ -632,9 +691,10 @@ mod tests {
     #[test]
     fn nouveau_device_does_not_trigger_workaround() {
         assert!(!primary_renderer_is_nvidia(
-            &[device("card0", false, true)],
+            &[device("card0", false)],
             None,
             false,
+            Some(true),
         ));
     }
 }

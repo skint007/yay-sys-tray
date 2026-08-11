@@ -6425,6 +6425,7 @@ dependencies = [
  "chrono",
  "dirs",
  "ksni",
+ "libloading",
  "log",
  "reqwest 0.12.28",
  "resvg",
