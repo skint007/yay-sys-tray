@@ -119,7 +119,7 @@ fn nvidia_renderer_present() -> bool {
             .is_ok_and(|value| value.eq_ignore_ascii_case("nvidia"))
         || std::env::var("__EGL_VENDOR_LIBRARY_FILENAMES")
             .is_ok_and(|value| egl_vendor_list_selects_nvidia(&value));
-    let compositor_card = selected_compositor_card();
+    let compositor_card = selected_compositor_card(&devices);
 
     primary_renderer_is_nvidia(
         &devices,
@@ -170,19 +170,47 @@ fn read_drm_device(card_path: &Path) -> Option<DrmDevice> {
     })
 }
 
-fn selected_compositor_card() -> Option<String> {
+fn selected_compositor_card(devices: &[DrmDevice]) -> Option<String> {
     COMPOSITOR_DRM_DEVICE_VARS.iter().find_map(|name| {
         let value = std::env::var(name).ok()?;
-        first_card_from_device_list(&value)
+        first_available_card_from_device_list(&value, devices)
     })
 }
 
+#[cfg(test)]
 fn first_card_from_device_list(value: &str) -> Option<String> {
-    let value = value.trim();
-    let list_separator = value.char_indices().find_map(|(index, character)| {
-        (character == ':' && value[index + 1..].trim_start().starts_with('/')).then_some(index)
-    });
-    let path = value[..list_separator.unwrap_or(value.len())].trim();
+    card_names_from_device_list(value).into_iter().next()
+}
+
+fn first_available_card_from_device_list(value: &str, devices: &[DrmDevice]) -> Option<String> {
+    card_names_from_device_list(value)
+        .into_iter()
+        .find(|card| devices.iter().any(|device| device.card_name == *card))
+}
+
+fn card_names_from_device_list(value: &str) -> Vec<String> {
+    let mut cards = Vec::new();
+    let mut remaining = value.trim();
+
+    while !remaining.is_empty() {
+        let list_separator = remaining.char_indices().find_map(|(index, character)| {
+            (character == ':' && remaining[index + 1..].trim_start().starts_with('/'))
+                .then_some(index)
+        });
+        let path_end = list_separator.unwrap_or(remaining.len());
+        if let Some(card) = card_name_from_path(remaining[..path_end].trim()) {
+            cards.push(card);
+        }
+        let Some(separator) = list_separator else {
+            break;
+        };
+        remaining = remaining[separator + 1..].trim_start();
+    }
+
+    cards
+}
+
+fn card_name_from_path(path: &str) -> Option<String> {
     if path.is_empty() {
         return None;
     }
@@ -224,8 +252,9 @@ fn primary_renderer_is_nvidia(
 #[cfg(test)]
 mod tests {
     use super::{
-        egl_vendor_list_selects_nvidia, first_card_from_device_list, is_wayland_session,
-        primary_renderer_is_nvidia, should_disable_dmabuf, DrmDevice,
+        egl_vendor_list_selects_nvidia, first_available_card_from_device_list,
+        first_card_from_device_list, is_wayland_session, primary_renderer_is_nvidia,
+        should_disable_dmabuf, DrmDevice,
     };
 
     fn device(card_name: &str, nvidia_driver: bool, boot_vga: bool) -> DrmDevice {
@@ -445,6 +474,18 @@ mod tests {
             Some("card1")
         );
         assert_eq!(first_card_from_device_list("  "), None);
+    }
+
+    #[test]
+    fn compositor_device_list_skips_unavailable_cards() {
+        assert_eq!(
+            first_available_card_from_device_list(
+                "/dev/dri/card9:/dev/dri/card1",
+                &[device("card0", false, true), device("card1", true, false)]
+            )
+            .as_deref(),
+            Some("card1")
+        );
     }
 
     #[test]
