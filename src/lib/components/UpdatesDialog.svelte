@@ -71,8 +71,16 @@
   let primaryMenu = $state(false);
   let showDeps = $state<{ pkg: string; reverse: boolean; repo: string; host: string | null } | null>(null);
   let warnPartialUpdates = $state(true);
-  // The restart flag of an update held back by the partial-update warning.
-  let pendingRestart = $state<boolean | null>(null);
+  // An update held back by the partial-update warning. Snapshotted rather than
+  // re-read on confirm: a re-check can land while the dialog waits and move the
+  // active host or its selection.
+  let pending = $state<{
+    key: string;
+    name: string;
+    packages: string[];
+    total: number;
+    restart: boolean;
+  } | null>(null);
 
   let hosts = $derived.by<Host[]>(() => {
     const list: Host[] = [];
@@ -233,6 +241,11 @@
   $effect(() => {
     const validKeys = new Set(hosts.map((h) => h.key));
 
+    // A warning whose host has gone (updated elsewhere, or offline on the
+    // re-check) describes an update that can no longer run — drop it rather
+    // than let it be confirmed.
+    if (pending && !validKeys.has(pending.key)) pending = null;
+
     const prunedChecked = checkedHosts.filter((k) => validKeys.has(k));
     if (prunedChecked.length !== checkedHosts.length) {
       checkedHosts = prunedChecked;
@@ -375,20 +388,27 @@
 
   function runPrimary(restart: boolean) {
     primaryMenu = false;
-    if (warnPartialUpdates && partialUpdate) {
-      pendingRestart = restart;
+    if (warnPartialUpdates && partialUpdate && activeHost) {
+      pending = {
+        key: activeKey,
+        name: activeHost.name,
+        packages: [...activeSelected],
+        total: activeHost.updates.length,
+        restart,
+      };
       return;
     }
-    executePrimary(restart);
+    executePrimary(activeKey, activeSelected, restart);
   }
 
   function confirmPartialUpdate(dontWarnAgain: boolean) {
-    const restart = pendingRestart;
-    pendingRestart = null;
-    // Launch before persisting the preference: awaiting the config round-trip
-    // first would let a background re-check land in the gap and change the
-    // selection out from under the update the user just confirmed.
-    if (restart !== null) executePrimary(restart);
+    const p = pending;
+    pending = null;
+    // Runs the snapshot taken when the warning opened, and runs it before
+    // persisting the preference: both the wait for the user and the config
+    // round-trip are long enough for a re-check to land and move the selection
+    // out from under the update they confirmed.
+    if (p) executePrimary(p.key, p.packages, p.restart);
     if (dontWarnAgain) stopWarningAboutPartialUpdates();
   }
 
@@ -405,21 +425,20 @@
     }
   }
 
-  function executePrimary(restart: boolean) {
-    const sel = activeSelected;
+  function executePrimary(key: string, sel: string[], restart: boolean) {
     if (sel.length > 0) {
       const p =
-        activeKey === "local"
+        key === "local"
           ? runLocalUpdatePackages(sel, restart)
-          : runRemoteUpdatePackages(activeKey, sel, restart);
+          : runRemoteUpdatePackages(key, sel, restart);
       // The remote command rejects when the selection no longer matches that
       // host's last check. Swallowing it entirely would mean the click opened
       // no terminal and said nothing anywhere.
       p.catch((e) => console.error("update failed:", e));
-    } else if (activeKey === "local") {
+    } else if (key === "local") {
       runLocalUpdate(restart).catch(() => {});
     } else {
-      runRemoteUpdate(activeKey, restart).catch(() => {});
+      runRemoteUpdate(key, restart).catch(() => {});
     }
   }
 
@@ -675,13 +694,13 @@
   {/if}
 </div>
 
-{#if pendingRestart !== null && activeHost}
+{#if pending}
   <PartialUpdateWarning
-    selected={selCount}
-    total={activeHost.updates.length}
-    host={activeHost.name}
+    selected={pending.packages.length}
+    total={pending.total}
+    host={pending.name}
     onconfirm={confirmPartialUpdate}
-    oncancel={() => (pendingRestart = null)}
+    oncancel={() => (pending = null)}
   />
 {/if}
 
@@ -694,7 +713,7 @@
     if (e.key !== "Escape") return;
     // Dismiss whichever overlay is open first, rather than hiding the whole
     // window out from under it.
-    if (pendingRestart !== null) pendingRestart = null;
+    if (pending) pending = null;
     else if (showDeps) showDeps = null;
     else onclose();
   }}
