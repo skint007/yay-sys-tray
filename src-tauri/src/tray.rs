@@ -730,10 +730,10 @@ async fn run_full_check(app_handle: tauri::AppHandle, fresh_for_minutes: Option<
     // local check went: the two halves fail independently. A host whose task
     // failed to join is missing from the results altogether, so a short list
     // means part of the fleet went unchecked rather than came back clean.
-    tray_state.remote_scan_ok.store(
-        discovery_ok && remote_hosts.len() == expected_remote_count,
-        Ordering::Release,
-    );
+    let remote_fleet_seen = discovery_ok && remote_hosts.len() == expected_remote_count;
+    tray_state
+        .remote_scan_ok
+        .store(remote_fleet_seen, Ordering::Release);
     tray_state
         .remote_scan_generation
         .store(scan_generation, Ordering::Release);
@@ -748,8 +748,11 @@ async fn run_full_check(app_handle: tauri::AppHandle, fresh_for_minutes: Option<
             let listed_count = check_result.updates.len() as u32
                 + remote_hosts.iter().map(|h| h.updates.len() as u32).sum::<u32>();
             let old_count = *tray_state.previous_count.read().await;
-            let all_remote_checks_succeeded = remote_hosts.len() == expected_remote_count
-                && remote_hosts.iter().all(|host| host.error.is_none());
+            // A tailnet that couldn't be queried yields no hosts *and* no
+            // expectation of any, so counting alone would call the scan a
+            // success and let the freshness window hand out its empty results.
+            let all_remote_checks_succeeded =
+                remote_fleet_seen && remote_hosts.iter().all(|host| host.error.is_none());
 
             *tray_state.local_result.write().await = Some(check_result.clone());
             tray_state.local_check_ok.store(true, Ordering::Release);

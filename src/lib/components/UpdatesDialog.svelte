@@ -25,11 +25,16 @@
     onclose,
     onnavigate,
     onquit,
+    onupdatelaunched,
     previewChecking,
   }: {
     onclose: () => void;
     onnavigate?: (view: "settings" | "about") => void;
     onquit?: () => void;
+    // Reports that an update was launched from here. The parent owns that fact
+    // because this component is unmounted while the user is in Settings or
+    // About, which would otherwise forget it mid-update.
+    onupdatelaunched?: () => void;
     // Dev-only: seed the "checking" view for the preview harness (no IPC).
     previewChecking?: {
       hosts: { key: string; name: string }[];
@@ -350,14 +355,6 @@
         checking = false;
         loadResults();
       }),
-      // "Close window after updating". The backend fires this once an update run
-      // has left nothing pending anywhere; acting on it only when *this* dialog
-      // launched the update keeps it from dismissing a window the user opened
-      // again later, while an old terminal was still running.
-      listen("close-after-update", () => {
-        if (!launchedUpdate) return;
-        onclose();
-      }),
     ]);
   });
 
@@ -415,13 +412,9 @@
     p.catch((e) => console.error("remove failed:", e));
   }
 
-  // Whether an update was launched from this dialog — the only thing that may
-  // trigger the auto-close. Removals and plain re-checks never count.
-  let launchedUpdate = false;
-
   function runPrimary(restart: boolean) {
     primaryMenu = false;
-    launchedUpdate = true;
+    onupdatelaunched?.();
     const sel = activeSelected;
     if (sel.length > 0) {
       const p =
@@ -440,7 +433,7 @@
   }
 
   function runRemoteBulk() {
-    launchedUpdate = true;
+    onupdatelaunched?.();
     // Each host reboots only if it actually needs a restart (backend decides).
     runUpdateSelected(checkedHosts, true).catch(() => {});
   }

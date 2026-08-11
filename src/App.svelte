@@ -12,6 +12,9 @@
   type View = "settings" | "updates" | "about" | null;
   let currentView = $state<View>(null);
   let previousView: View = null;
+  // Whether an update was launched from the Updates window since it was opened.
+  // The only thing that may trigger the "close window after updating" setting.
+  let updateLaunched = false;
 
   // SKINT007 follows the OS color scheme (dark by default, lit by intent).
   function applyTheme() {
@@ -91,9 +94,25 @@
     });
 
     await listen<{ view: string }>("open-window", (event) => {
+      // A fresh open is a new session: an update launched before the window was
+      // last hidden must not close the window someone just asked for.
+      updateLaunched = false;
       previousView = currentView;
       currentView = event.payload.view as View;
     });
+
+    // "Close window after updating". The backend fires this once an update run
+    // has left nothing pending anywhere. Owned here rather than in the Updates
+    // dialog because that component is unmounted while the user is in Settings
+    // or About, which would forget the update mid-run. If they are in one of
+    // those views when it lands, the close is dropped rather than queued —
+    // they're doing something else, and dismissing the window later would come
+    // out of nowhere.
+    await listen("close-after-update", () => {
+      if (!updateLaunched || currentView !== "updates") return;
+      hideWindow();
+    });
+
     await emit("frontend-ready");
   });
 
@@ -108,6 +127,16 @@
     quitApp().catch(() => {});
   }
 
+  // Back to tray-only mode: drop the view state so the next open re-applies its
+  // size, then hide (a tray app never quits on close).
+  function hideWindow() {
+    previousView = null;
+    currentView = null;
+    appliedView = null;
+    updateLaunched = false;
+    getCurrentWindow().hide().catch(() => {});
+  }
+
   function closeDialog() {
     // Settings/About reached from the Updates window → go back there instead of
     // hiding; otherwise (opened directly from the tray) hide the window.
@@ -116,17 +145,19 @@
       previousView = null;
       return;
     }
-    previousView = null;
-    currentView = null;
-    appliedView = null;
-    getCurrentWindow().hide().catch(() => {});
+    hideWindow();
   }
 </script>
 
 {#if currentView === "settings"}
   <SettingsDialog onclose={closeDialog} />
 {:else if currentView === "updates"}
-  <UpdatesDialog onclose={closeDialog} onnavigate={navigate} onquit={quit} />
+  <UpdatesDialog
+    onclose={closeDialog}
+    onnavigate={navigate}
+    onquit={quit}
+    onupdatelaunched={() => (updateLaunched = true)}
+  />
 {:else if currentView === "about"}
   <AboutDialog onclose={closeDialog} />
 {:else}
