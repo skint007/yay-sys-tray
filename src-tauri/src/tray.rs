@@ -809,13 +809,24 @@ async fn handle_update_finished(app_handle: tauri::AppHandle, scope: String, was
 /// no AUR outage. Anything unknown deliberately counts as "not clean" — an empty
 /// update list that only means "we couldn't look" is not an up-to-date system,
 /// and the warning is worth reading.
-fn fleet_is_clean(local: Option<&CheckResult>, remote: &[HostResult], scans_ok: bool) -> bool {
+///
+/// `local_applies` is false where there is no local system to update (a
+/// non-Arch install monitoring remote hosts only), and the fleet is then the
+/// remote hosts alone.
+fn fleet_is_clean(
+    local: Option<&CheckResult>,
+    remote: &[HostResult],
+    scans_ok: bool,
+    local_applies: bool,
+) -> bool {
     if !scans_ok {
         return false;
     }
-    let Some(local) = local else { return false };
-    if !local.updates.is_empty() || local.aur_error.is_some() {
-        return false;
+    if local_applies {
+        let Some(local) = local else { return false };
+        if !local.updates.is_empty() || local.aur_error.is_some() {
+            return false;
+        }
     }
     remote
         .iter()
@@ -854,11 +865,14 @@ async fn maybe_close_after_update(app_handle: &tauri::AppHandle) {
 
     let local = tray_state.local_result.read().await.clone();
     let remote = tray_state.remote_results.read().await.clone();
+    // The local half only exists on Arch; elsewhere the app monitors remote
+    // hosts only and `checkupdates` can never run.
+    let local_applies = crate::system::is_arch_linux();
     // A failed local check leaves the previous result in place, and a failed
     // discovery leaves no remote results at all; neither may pass as clean.
     let scans_ok = tray_state.remote_discovery_ok.load(Ordering::Acquire)
-        && tray_state.local_check_ok.load(Ordering::Acquire);
-    if !fleet_is_clean(local.as_ref(), &remote, scans_ok) {
+        && (!local_applies || tray_state.local_check_ok.load(Ordering::Acquire));
+    if !fleet_is_clean(local.as_ref(), &remote, scans_ok, local_applies) {
         return;
     }
 
@@ -1311,30 +1325,49 @@ mod tests {
         assert!(fleet_is_clean(
             Some(&local(vec![])),
             &[host("arch-serv", vec![])],
-            true
+            true,
+            true,
         ));
     }
 
     #[test]
     fn pending_updates_are_not_clean() {
-        assert!(!fleet_is_clean(Some(&local(vec![update("jq")])), &[], true));
+        assert!(!fleet_is_clean(
+            Some(&local(vec![update("jq")])),
+            &[],
+            true,
+            true,
+        ));
         assert!(!fleet_is_clean(
             Some(&local(vec![])),
             &[host("arch-serv", vec![update("jq")])],
-            true
+            true,
+            true,
         ));
     }
 
     #[test]
     fn a_check_that_never_ran_is_not_clean() {
-        assert!(!fleet_is_clean(None, &[], true));
+        assert!(!fleet_is_clean(None, &[], true, true));
+    }
+
+    #[test]
+    fn a_host_only_install_ignores_the_local_half() {
+        // Nothing to check locally off Arch, so the remote hosts are the fleet.
+        assert!(fleet_is_clean(None, &[host("arch-serv", vec![])], true, false));
+        assert!(!fleet_is_clean(
+            None,
+            &[host("arch-serv", vec![update("jq")])],
+            true,
+            false,
+        ));
     }
 
     #[test]
     fn an_unqueryable_tailnet_is_not_clean() {
         // Discovery failed, so the empty remote list means "we never saw the
         // fleet", not "the fleet is up to date".
-        assert!(!fleet_is_clean(Some(&local(vec![])), &[], false));
+        assert!(!fleet_is_clean(Some(&local(vec![])), &[], false, true));
     }
 
     #[test]
@@ -1343,15 +1376,25 @@ mod tests {
         // as an up-to-date system.
         let mut unreachable = host("arch-serv", vec![]);
         unreachable.error = Some("ssh: connect timed out".to_string());
-        assert!(!fleet_is_clean(Some(&local(vec![])), &[unreachable], true));
+        assert!(!fleet_is_clean(
+            Some(&local(vec![])),
+            &[unreachable],
+            true,
+            true,
+        ));
 
         let mut aur_down = local(vec![]);
         aur_down.aur_error = Some("AUR unreachable".to_string());
-        assert!(!fleet_is_clean(Some(&aur_down), &[], true));
+        assert!(!fleet_is_clean(Some(&aur_down), &[], true, true));
 
         let mut host_aur_down = host("arch-serv", vec![]);
         host_aur_down.aur_error = Some("AUR unreachable".to_string());
-        assert!(!fleet_is_clean(Some(&local(vec![])), &[host_aur_down], true));
+        assert!(!fleet_is_clean(
+            Some(&local(vec![])),
+            &[host_aur_down],
+            true,
+            true,
+        ));
     }
 
     #[cfg(target_os = "linux")]
