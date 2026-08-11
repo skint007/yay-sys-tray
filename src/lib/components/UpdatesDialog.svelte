@@ -241,17 +241,39 @@
   let selCount = $derived(activeSelected.length);
   let allSelected = $derived(visiblePkgs.length > 0 && visiblePkgs.every((p) => selectedSet.has(p)));
   let pkgsIndeterminate = $derived(!allSelected && visiblePkgs.some((p) => selectedSet.has(p)));
+  // Every update on the active host this app can apply, unfiltered by the
+  // search box: selections survive the filter, so completeness has to be judged
+  // against the whole host. Blocked updates are left out — they can't be
+  // selected, so counting them would put a complete selection out of reach on a
+  // helperless host, and the full upgrade there already reports the AUR updates
+  // it can't apply.
+  let actionablePkgs = $derived(
+    activeHost
+      ? activeHost.updates
+          .filter((u) => !activeHost.blockedPkgs.has(u.package))
+          .map((u) => u.package)
+      : [],
+  );
+  // The selection covers everything the host has to offer, so the user asked
+  // for a full upgrade by another route. Compared by name rather than by count:
+  // a re-check can swap one update for another between renders, which leaves
+  // the count intact while the selection no longer covers the host.
+  let completeSelection = $derived(
+    actionablePkgs.length > 0 && actionablePkgs.every((p) => selectedSet.has(p)),
+  );
   // A selection that leaves some of the host's updates behind — a partial
-  // upgrade, which is what the warning dialog is about. Measured against
-  // everything applicable on the host: not the filtered view, since selections
-  // survive the search box, and not blocked updates, which can't be selected
-  // and so would make every possible selection read as partial.
-  let partialUpdate = $derived(!!activeHost && selCount > 0 && selCount < actionable(activeHost));
+  // upgrade, which is what the warning dialog is about. It is the exact
+  // complement of a complete selection, so the warning and the routing above
+  // can never disagree about whether an update is the whole host.
+  let partialUpdate = $derived(selCount > 0 && !completeSelection);
   let primaryLabel = $derived.by(() => {
     if (!activeHost) return "Update";
-    const base = selCount > 0 ? "Update Selected" : "Update All";
+    // A complete selection runs the same full upgrade the button runs with
+    // nothing selected, so it says so.
+    const full = selCount === 0 || completeSelection;
+    const base = full ? "Update All" : "Update Selected";
     const suffix = activeHost.needsRestart ? " & Restart" : "";
-    const count = selCount > 0 ? selCount : actionable(activeHost);
+    const count = full ? actionable(activeHost) : selCount;
     return `${base}${suffix} (${count})`;
   });
   // Nothing left to apply on this host — every update it has needs an AUR
@@ -498,7 +520,7 @@
       };
       return;
     }
-    executePrimary(activeKey, activeSelected, restart);
+    executePrimary(activeKey, activeSelected, restart, completeSelection);
   }
 
   function confirmPartialUpdate(dontWarnAgain: boolean) {
@@ -508,7 +530,9 @@
     // persisting the preference: both the wait for the user and the config
     // round-trip are long enough for a re-check to land and move the selection
     // out from under the update they confirmed.
-    if (p) executePrimary(p.key, p.packages, p.restart);
+    // Never a full upgrade: the warning only holds selections that leave part
+    // of the host behind.
+    if (p) executePrimary(p.key, p.packages, p.restart, false);
     if (dontWarnAgain) stopWarningAboutPartialUpdates();
   }
 
@@ -525,12 +549,17 @@
     }
   }
 
-  function executePrimary(key: string, sel: string[], restart: boolean) {
+  /** Launch the update for a host. `full` routes a request that covers every
+   * update the host has through `yay -Syu` instead of a package list: the check
+   * runs against a throwaway database, so `yay -S <names>` upgrades those names
+   * against a possibly stale sync db and leaves behind anything published since
+   * the check (#37). The full upgrade syncs first and picks all of it up. */
+  function executePrimary(key: string, sel: string[], restart: boolean, full: boolean) {
     // Reported here rather than from runPrimary: that one may only open the
     // partial-update warning, and an update the user hasn't confirmed yet must
     // not arm the auto-close.
     onupdatelaunched?.();
-    if (sel.length > 0) {
+    if (!full && sel.length > 0) {
       const p =
         key === "local"
           ? runLocalUpdatePackages(sel, restart)
