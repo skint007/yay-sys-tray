@@ -208,6 +208,10 @@
   });
 
   function beginChecking(hosts: { key: string; name: string }[]) {
+    // Results are about to be replaced, so anything the warning is holding is
+    // already on its way out — drop it now rather than let it be confirmed
+    // against numbers the scan has superseded.
+    pending = null;
     scanHosts = hosts;
     const st: Record<string, ScanStatus> = {};
     for (const h of hosts) st[h.key] = "queued";
