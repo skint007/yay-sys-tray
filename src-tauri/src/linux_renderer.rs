@@ -23,18 +23,22 @@ pub fn configure() -> bool {
     let session_type = std::env::var("XDG_SESSION_TYPE").ok();
     let wayland_display = std::env::var("WAYLAND_DISPLAY").ok();
     let inherited_wayland_socket = std::env::var("WAYLAND_SOCKET").ok();
+    let inherited_wayland_socket_present = inherited_wayland_socket
+        .as_deref()
+        .is_some_and(|value| !value.trim().is_empty());
     let default_wayland_display =
         default_wayland_socket_available(std::env::var_os("XDG_RUNTIME_DIR").as_deref())
             .then(|| "wayland-0".to_string());
     let wayland_socket = inherited_wayland_socket
         .as_deref()
         .or(default_wayland_display.as_deref());
-    let wayland_display_for_probe = wayland_display.as_deref().or_else(|| {
-        inherited_wayland_socket
-            .is_none()
-            .then_some(default_wayland_display.as_deref())
-            .flatten()
-    });
+    let wayland_display_for_probe = (!inherited_wayland_socket_present)
+        .then_some(
+            wayland_display
+                .as_deref()
+                .or(default_wayland_display.as_deref()),
+        )
+        .flatten();
     let x11_display = std::env::var("DISPLAY").ok();
     let gdk_backend = std::env::var("GDK_BACKEND").ok();
     let override_present = RENDERER_OVERRIDES
@@ -42,7 +46,7 @@ pub fn configure() -> bool {
         .any(|name| std::env::var_os(name).is_some());
 
     if !should_disable_dmabuf(
-        nvidia_renderer_present(wayland_display_for_probe),
+        nvidia_renderer_present(wayland_display_for_probe, inherited_wayland_socket_present),
         session_type.as_deref(),
         wayland_display.as_deref(),
         wayland_socket,
@@ -124,7 +128,10 @@ struct DrmDevice {
     nvidia_driver: bool,
 }
 
-fn nvidia_renderer_present(wayland_display: Option<&str>) -> bool {
+fn nvidia_renderer_present(
+    wayland_display: Option<&str>,
+    inherited_wayland_socket_present: bool,
+) -> bool {
     let Ok(entries) = std::fs::read_dir("/sys/class/drm") else {
         return false;
     };
@@ -143,10 +150,11 @@ fn nvidia_renderer_present(wayland_display: Option<&str>) -> bool {
     let compositor_card = selected_compositor_card(&devices);
     let mixed_gpu_system = devices.iter().any(|device| device.nvidia_driver)
         && devices.iter().any(|device| !device.nvidia_driver);
-    let active_egl_renderer =
-        (mixed_gpu_system && compositor_card.is_none() && !nvidia_renderer_requested)
-            .then(|| wayland_egl_vendor_is_nvidia(wayland_display))
-            .flatten();
+    let active_egl_renderer = (mixed_gpu_system
+        && compositor_card.is_none()
+        && !nvidia_renderer_requested)
+        .then(|| mixed_gpu_renderer_is_nvidia(wayland_display, inherited_wayland_socket_present))
+        .flatten();
 
     primary_renderer_is_nvidia(
         &devices,
@@ -154,6 +162,18 @@ fn nvidia_renderer_present(wayland_display: Option<&str>) -> bool {
         nvidia_renderer_requested,
         active_egl_renderer,
     )
+}
+
+fn mixed_gpu_renderer_is_nvidia(
+    wayland_display: Option<&str>,
+    inherited_wayland_socket_present: bool,
+) -> Option<bool> {
+    // An inherited Wayland socket is the connection GTK will use, but probing
+    // a duplicated descriptor would share and corrupt its protocol stream.
+    // Prefer the safe workaround when NVIDIA is one of the possible renderers.
+    inherited_wayland_socket_present
+        .then_some(true)
+        .or_else(|| wayland_egl_vendor_is_nvidia(wayland_display))
 }
 
 fn egl_vendor_list_selects_nvidia(value: &str) -> bool {
@@ -349,7 +369,7 @@ mod tests {
     use super::{
         default_wayland_socket_available, egl_vendor_list_selects_nvidia,
         first_available_card_from_device_list, first_card_from_device_list, is_wayland_session,
-        primary_renderer_is_nvidia, should_disable_dmabuf, DrmDevice,
+        mixed_gpu_renderer_is_nvidia, primary_renderer_is_nvidia, should_disable_dmabuf, DrmDevice,
     };
 
     fn device(card_name: &str, nvidia_driver: bool) -> DrmDevice {
@@ -542,6 +562,11 @@ mod tests {
             false,
             Some(true),
         ));
+    }
+
+    #[test]
+    fn inherited_wayland_socket_uses_safe_nvidia_fallback_on_multi_gpu_system() {
+        assert_eq!(mixed_gpu_renderer_is_nvidia(None, true), Some(true));
     }
 
     #[test]
