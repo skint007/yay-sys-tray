@@ -26,6 +26,7 @@ const config = {
   tailscale_enabled: true, tailscale_tags: "arch,linux,server", tailscale_timeout: 10,
   tailscale_ssh_user: "skint007",
   scheduled_check_enabled: true, scheduled_check_day: 4, scheduled_check_time: "18:00",
+  warn_partial_updates: true,
 };
 
 const checkResult = {

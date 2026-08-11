@@ -136,6 +136,14 @@
           </div>
           <div class="div"></div>
           <div class="trow">
+            <div class="block">
+              <div class="row-title">Warn before partial updates</div>
+              <div class="row-desc">When updating only some of the available packages</div>
+            </div>
+            <ToggleSwitch bind:checked={config.warn_partial_updates} />
+          </div>
+          <div class="div"></div>
+          <div class="trow">
             <div class="block"><div class="row-title">Keep terminal open after finish</div></div>
             <ToggleSwitch bind:checked={config.hold_terminal} />
           </div>

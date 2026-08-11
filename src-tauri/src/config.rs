@@ -49,6 +49,11 @@ pub struct AppConfig {
     pub scheduled_check_day: u32,
     #[serde(default = "default_sched_time")]
     pub scheduled_check_time: String,
+    /// Warn before updating only part of what's available — a partial upgrade
+    /// is the classic way to break an Arch install. Cleared by the dialog's
+    /// "don't show this again".
+    #[serde(default = "default_true")]
+    pub warn_partial_updates: bool,
 }
 
 fn default_interval() -> u32 { 60 }
@@ -82,6 +87,7 @@ impl Default for AppConfig {
             scheduled_check_enabled: false,
             scheduled_check_day: 5,
             scheduled_check_time: "02:00".into(),
+            warn_partial_updates: true,
         }
     }
 }

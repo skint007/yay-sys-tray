@@ -62,4 +62,5 @@ export interface AppConfig {
   scheduled_check_enabled: boolean;
   scheduled_check_day: number;
   scheduled_check_time: string;
+  warn_partial_updates: boolean;
 }
