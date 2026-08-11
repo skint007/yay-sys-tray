@@ -31,13 +31,18 @@ pub struct TrayState {
     /// concurrent re-checks that mutate the (single-threaded, non-thread-safe)
     /// GTK tray from multiple worker threads at the same time and crash.
     refresh_lock: tokio::sync::Mutex<()>,
-    /// Whether the last full scan managed to query the tailnet. A failed
-    /// discovery leaves `remote_results` empty, which is indistinguishable from
-    /// a fleet with no remote hosts unless it's recorded here.
-    remote_discovery_ok: AtomicBool,
-    /// Bumped whenever the remote configuration changes. A scan that started
-    /// under an older generation describes a fleet nobody asked about any more,
-    /// so it may not mark the remote side as checked when it lands.
+    /// Whether the remote half of the last full scan can be trusted: discovery
+    /// queried the tailnet, and every host it discovered produced a result. A
+    /// failed discovery leaves `remote_results` empty, which is otherwise
+    /// indistinguishable from a fleet with no remote hosts.
+    remote_scan_ok: AtomicBool,
+    /// The remote-config generation that scan ran under. Recorded rather than
+    /// compared, so whether the results still describe the configured fleet is
+    /// decided when they are read — a scan can never mark itself valid against
+    /// a configuration that changed while it was running.
+    remote_scan_generation: AtomicU64,
+    /// Bumped whenever the remote configuration changes, retiring every scan
+    /// that started before it.
     remote_config_generation: AtomicU64,
     /// Whether the most recent local check succeeded. A failed one deliberately
     /// leaves the previous `local_result` in place so the window still has
@@ -79,7 +84,8 @@ impl TrayState {
             #[cfg(target_os = "linux")]
             linux_tray: Mutex::new(None),
             refresh_lock: tokio::sync::Mutex::new(()),
-            remote_discovery_ok: AtomicBool::new(true),
+            remote_scan_ok: AtomicBool::new(true),
+            remote_scan_generation: AtomicU64::new(0),
             remote_config_generation: AtomicU64::new(0),
             local_check_ok: AtomicBool::new(true),
             full_check_in_progress: AtomicBool::new(false),
@@ -719,14 +725,16 @@ async fn run_full_check(app_handle: tauri::AppHandle, fresh_for_minutes: Option<
     let tray_state = app_handle.state::<TrayState>();
 
     // Record what this scan learned about the remote fleet whichever way the
-    // local check went: the two halves fail independently. Hosts only count as
-    // the checked fleet if the remote settings haven't changed since the scan
-    // started, since they would then describe a fleet nobody asked about.
-    let config_unchanged =
-        tray_state.remote_config_generation.load(Ordering::Acquire) == scan_generation;
+    // local check went: the two halves fail independently. A host whose task
+    // failed to join is missing from the results altogether, so a short list
+    // means part of the fleet went unchecked rather than came back clean.
+    tray_state.remote_scan_ok.store(
+        discovery_ok && remote_hosts.len() == expected_remote_count,
+        Ordering::Release,
+    );
     tray_state
-        .remote_discovery_ok
-        .store(discovery_ok && config_unchanged, Ordering::Release);
+        .remote_scan_generation
+        .store(scan_generation, Ordering::Release);
 
     match result {
         Ok(check_result) => {
@@ -833,15 +841,21 @@ async fn handle_update_finished(app_handle: tauri::AppHandle, scope: String, was
     }
 }
 
-/// Mark the stored remote results as no longer describing the configured fleet,
-/// so nothing treats them as a checked one until the next full scan. Bumping the
-/// generation also disarms a scan that is already in flight under the old
-/// configuration and would otherwise land as if it had checked the new one.
+/// Retire the stored remote results: they describe the fleet as it used to be
+/// configured, so nothing may treat them as a checked one until a fresh scan
+/// lands. This also disarms a scan already in flight under the old
+/// configuration, which would otherwise land as if it had checked the new one.
 pub fn invalidate_remote_scan(tray_state: &TrayState) {
     tray_state
         .remote_config_generation
         .fetch_add(1, Ordering::AcqRel);
-    tray_state.remote_discovery_ok.store(false, Ordering::Release);
+}
+
+/// Whether the stored remote results still describe the configured fleet: the
+/// scan that produced them saw all of it, and the remote configuration hasn't
+/// changed since that scan started.
+fn remote_scan_is_current(scan_ok: bool, scan_generation: u64, config_generation: u64) -> bool {
+    scan_ok && scan_generation == config_generation
 }
 
 /// True when the latest results leave nothing to act on: every scan behind them
@@ -908,10 +922,16 @@ async fn maybe_close_after_update(app_handle: &tauri::AppHandle) {
     // The local half only exists on Arch; elsewhere the app monitors remote
     // hosts only and `checkupdates` can never run.
     let local_applies = crate::system::is_arch_linux();
-    // A failed local check leaves the previous result in place, and a failed
-    // discovery leaves no remote results at all; neither may pass as clean.
-    let scans_ok = tray_state.remote_discovery_ok.load(Ordering::Acquire)
-        && (!local_applies || tray_state.local_check_ok.load(Ordering::Acquire));
+    // A failed local check leaves the previous result in place, and a remote
+    // scan that missed part of the fleet (or predates the current settings)
+    // leaves results that say nothing about it; neither may pass as clean.
+    let remote_current = remote_scan_is_current(
+        tray_state.remote_scan_ok.load(Ordering::Acquire),
+        tray_state.remote_scan_generation.load(Ordering::Acquire),
+        tray_state.remote_config_generation.load(Ordering::Acquire),
+    );
+    let scans_ok =
+        remote_current && (!local_applies || tray_state.local_check_ok.load(Ordering::Acquire));
     if !fleet_is_clean(local.as_ref(), &remote, scans_ok, local_applies) {
         return;
     }
@@ -1330,7 +1350,9 @@ fn start_bounce_animation(
 
 #[cfg(test)]
 mod tests {
-    use super::{check_is_fresh, fleet_is_clean, CheckResult, HostResult};
+    use super::{
+        check_is_fresh, fleet_is_clean, remote_scan_is_current, CheckResult, HostResult,
+    };
     use crate::checker::UpdateInfo;
     use chrono::{Duration, Local, TimeZone};
 
@@ -1441,6 +1463,25 @@ mod tests {
         let mut blocked = host("arch-serv", vec![update("yay-bin")]);
         blocked.aur_helper_missing = true;
         assert!(!fleet_is_clean(Some(&local(vec![])), &[blocked], true, true));
+    }
+
+    #[test]
+    fn a_complete_scan_under_the_current_settings_is_current() {
+        assert!(remote_scan_is_current(true, 3, 3));
+    }
+
+    #[test]
+    fn a_scan_overtaken_by_a_settings_change_is_not_current() {
+        // It saw the fleet it was told about, which is no longer the configured
+        // one. Decided here rather than when the scan lands, so a settings save
+        // racing that landing can't be overwritten by it.
+        assert!(!remote_scan_is_current(true, 3, 4));
+    }
+
+    #[test]
+    fn a_scan_that_missed_a_host_is_not_current() {
+        // A host whose check never produced a result is unknown, not clean.
+        assert!(!remote_scan_is_current(false, 3, 3));
     }
 
     #[test]
