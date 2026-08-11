@@ -103,6 +103,7 @@ Right-click the tray icon and select **Settings**. Configuration is stored in `~
 | Notifications | always, new_only, or never | new_only |
 | Terminal | Terminal emulator for running updates | auto-detected |
 | --noconfirm | Skip yay confirmation prompts (Arch only) | off |
+| Warn before partial updates | Confirm before updating only some of the available packages | on |
 | Autostart | Enable systemd user service (Arch only) | off |
 | Animations | Animate tray icon (spin/bounce) | on |
 | Re-check cooldown | Minimum minutes between implicit re-checks | 5 minutes |

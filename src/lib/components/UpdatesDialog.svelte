@@ -3,6 +3,8 @@
   import { listen } from "@tauri-apps/api/event";
   import type { CheckResult, HostResult, UpdateInfo } from "../types";
   import {
+    getConfig,
+    saveConfig,
     getCheckResult,
     runRemove,
     runRemoteRemove,
@@ -14,6 +16,7 @@
   } from "../ipc";
   import { repoRank, repoColorVar, UNKNOWN_REPO } from "../repo";
   import UpdateCard from "./UpdateCard.svelte";
+  import PartialUpdateWarning from "./PartialUpdateWarning.svelte";
   import Reticle from "./Reticle.svelte";
   import DependencyTree from "./DependencyTree.svelte";
   import WindowControls from "./WindowControls.svelte";
@@ -67,6 +70,9 @@
   let search = $state("");
   let primaryMenu = $state(false);
   let showDeps = $state<{ pkg: string; reverse: boolean; repo: string; host: string | null } | null>(null);
+  let warnPartialUpdates = $state(true);
+  // The restart flag of an update held back by the partial-update warning.
+  let pendingRestart = $state<boolean | null>(null);
 
   let hosts = $derived.by<Host[]>(() => {
     const list: Host[] = [];
@@ -169,6 +175,10 @@
   let selCount = $derived(activeSelected.length);
   let allSelected = $derived(visiblePkgs.length > 0 && visiblePkgs.every((p) => selectedSet.has(p)));
   let pkgsIndeterminate = $derived(!allSelected && visiblePkgs.some((p) => selectedSet.has(p)));
+  // A selection that leaves some of the host's updates behind — a partial
+  // upgrade, which is what the warning dialog is about. Measured against the
+  // whole host, not the filtered view: selections survive the search box.
+  let partialUpdate = $derived(!!activeHost && selCount > 0 && selCount < activeHost.updates.length);
   let primaryLabel = $derived.by(() => {
     if (!activeHost) return "Update";
     const base = selCount > 0 ? "Update Selected" : "Update All";
@@ -253,6 +263,10 @@
       checking = true;
       return;
     }
+
+    getConfig()
+      .then((cfg) => (warnPartialUpdates = cfg.warn_partial_updates !== false))
+      .catch((e) => console.error("Failed to load config:", e));
 
     await loadResults();
     // Register the scan-progress listeners. onMount's async return value is a
@@ -361,6 +375,32 @@
 
   function runPrimary(restart: boolean) {
     primaryMenu = false;
+    if (warnPartialUpdates && partialUpdate) {
+      pendingRestart = restart;
+      return;
+    }
+    executePrimary(restart);
+  }
+
+  async function confirmPartialUpdate(dontWarnAgain: boolean) {
+    const restart = pendingRestart;
+    pendingRestart = null;
+    if (dontWarnAgain) {
+      warnPartialUpdates = false;
+      // Re-read before writing: the settings view shares this config file, so
+      // saving our stale copy would undo whatever was changed there.
+      try {
+        const cfg = await getConfig();
+        cfg.warn_partial_updates = false;
+        await saveConfig(cfg);
+      } catch (e) {
+        console.error("Failed to save partial-update warning preference:", e);
+      }
+    }
+    if (restart !== null) executePrimary(restart);
+  }
+
+  function executePrimary(restart: boolean) {
     const sel = activeSelected;
     if (sel.length > 0) {
       const p =
@@ -630,6 +670,16 @@
   {/if}
 </div>
 
+{#if pendingRestart !== null && activeHost}
+  <PartialUpdateWarning
+    selected={selCount}
+    total={activeHost.updates.length}
+    host={activeHost.name}
+    onconfirm={confirmPartialUpdate}
+    oncancel={() => (pendingRestart = null)}
+  />
+{/if}
+
 {#if showDeps}
   <DependencyTree packageName={showDeps.pkg} reverse={showDeps.reverse} repository={showDeps.repo} hostname={showDeps.host} onclose={() => (showDeps = null)} />
 {/if}
@@ -637,9 +687,10 @@
 <svelte:window
   onkeydown={(e) => {
     if (e.key !== "Escape") return;
-    // Dismiss the dependency-tree overlay first if it's open, rather than
-    // hiding the whole window out from under it.
-    if (showDeps) showDeps = null;
+    // Dismiss whichever overlay is open first, rather than hiding the whole
+    // window out from under it.
+    if (pendingRestart !== null) pendingRestart = null;
+    else if (showDeps) showDeps = null;
     else onclose();
   }}
 />
