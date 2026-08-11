@@ -23,7 +23,7 @@ pub fn configure() -> bool {
         .any(|name| std::env::var_os(name).is_some());
 
     if !should_disable_dmabuf(
-        nvidia_gpu_present(),
+        nvidia_renderer_present(),
         session_type.as_deref(),
         wayland_display.as_deref(),
         gdk_backend.as_deref(),
@@ -39,13 +39,13 @@ pub fn configure() -> bool {
 }
 
 fn should_disable_dmabuf(
-    nvidia_gpu_present: bool,
+    nvidia_renderer_present: bool,
     session_type: Option<&str>,
     wayland_display: Option<&str>,
     gdk_backend: Option<&str>,
     override_present: bool,
 ) -> bool {
-    nvidia_gpu_present
+    nvidia_renderer_present
         && !override_present
         && is_wayland_session(session_type, wayland_display, gdk_backend)
 }
@@ -56,33 +56,84 @@ fn is_wayland_session(
     gdk_backend: Option<&str>,
 ) -> bool {
     if let Some(backends) = gdk_backend.filter(|value| !value.trim().is_empty()) {
-        return backends
-            .split(',')
-            .any(|backend| backend.trim().eq_ignore_ascii_case("wayland"));
+        let mut use_session_default = false;
+        for backend in backends.split(',').map(str::trim) {
+            if backend.eq_ignore_ascii_case("wayland") {
+                return true;
+            }
+            if backend == "*" {
+                use_session_default = true;
+            }
+        }
+        if !use_session_default {
+            return false;
+        }
     }
 
     session_type.is_some_and(|value| value.eq_ignore_ascii_case("wayland"))
         || wayland_display.is_some_and(|value| !value.trim().is_empty())
 }
 
-fn nvidia_gpu_present() -> bool {
-    if Path::new("/proc/driver/nvidia/version").is_file() {
-        return true;
-    }
+#[derive(Debug, Clone, Copy)]
+struct DrmDevice {
+    nvidia_driver: bool,
+    boot_vga: bool,
+}
 
+fn nvidia_renderer_present() -> bool {
     let Ok(entries) = std::fs::read_dir("/sys/class/drm") else {
         return false;
     };
 
-    entries.filter_map(Result::ok).any(|entry| {
-        std::fs::read_to_string(entry.path().join("device/vendor"))
-            .is_ok_and(|vendor| vendor.trim().eq_ignore_ascii_case("0x10de"))
+    let devices: Vec<DrmDevice> = entries
+        .filter_map(Result::ok)
+        .filter(|entry| is_drm_card(&entry.file_name().to_string_lossy()))
+        .filter_map(|entry| read_drm_device(&entry.path()))
+        .collect();
+    let nvidia_offload_requested = std::env::var("__NV_PRIME_RENDER_OFFLOAD")
+        .is_ok_and(|value| !value.trim().is_empty() && value.trim() != "0")
+        || std::env::var("__GLX_VENDOR_LIBRARY_NAME")
+            .is_ok_and(|value| value.eq_ignore_ascii_case("nvidia"));
+
+    primary_renderer_is_nvidia(&devices, nvidia_offload_requested)
+}
+
+fn is_drm_card(name: &str) -> bool {
+    name.strip_prefix("card").is_some_and(|suffix| {
+        !suffix.is_empty() && suffix.bytes().all(|byte| byte.is_ascii_digit())
     })
+}
+
+fn read_drm_device(card_path: &Path) -> Option<DrmDevice> {
+    let device_path = card_path.join("device");
+    let vendor = std::fs::read_to_string(device_path.join("vendor")).ok()?;
+    let driver = std::fs::read_link(device_path.join("driver"))
+        .ok()
+        .and_then(|path| path.file_name().map(|name| name.to_owned()));
+
+    Some(DrmDevice {
+        nvidia_driver: vendor.trim().eq_ignore_ascii_case("0x10de")
+            && driver.as_deref().is_some_and(|name| name == "nvidia"),
+        boot_vga: std::fs::read_to_string(device_path.join("boot_vga"))
+            .is_ok_and(|value| value.trim() == "1"),
+    })
+}
+
+fn primary_renderer_is_nvidia(devices: &[DrmDevice], nvidia_offload_requested: bool) -> bool {
+    let nvidia_device_present = devices.iter().any(|device| device.nvidia_driver);
+    if nvidia_offload_requested {
+        return nvidia_device_present;
+    }
+
+    devices
+        .iter()
+        .any(|device| device.boot_vga && device.nvidia_driver)
+        || (devices.len() == 1 && nvidia_device_present)
 }
 
 #[cfg(test)]
 mod tests {
-    use super::should_disable_dmabuf;
+    use super::{is_wayland_session, primary_renderer_is_nvidia, should_disable_dmabuf, DrmDevice};
 
     #[test]
     fn disables_dmabuf_for_nvidia_wayland_session() {
@@ -129,6 +180,16 @@ mod tests {
     }
 
     #[test]
+    fn wildcard_gdk_backend_uses_wayland_session_indicators() {
+        assert!(is_wayland_session(
+            Some("wayland"),
+            Some("wayland-0"),
+            Some("*")
+        ));
+        assert!(!is_wayland_session(Some("x11"), None, Some("x11,*")));
+    }
+
+    #[test]
     fn skips_non_nvidia_wayland_session() {
         assert!(!should_disable_dmabuf(
             false,
@@ -152,6 +213,79 @@ mod tests {
             Some("wayland-0"),
             None,
             true,
+        ));
+    }
+
+    #[test]
+    fn sole_nvidia_device_is_the_renderer() {
+        assert!(primary_renderer_is_nvidia(
+            &[DrmDevice {
+                nvidia_driver: true,
+                boot_vga: false,
+            }],
+            false,
+        ));
+    }
+
+    #[test]
+    fn primary_nvidia_device_is_the_renderer_on_multi_gpu_system() {
+        assert!(primary_renderer_is_nvidia(
+            &[
+                DrmDevice {
+                    nvidia_driver: true,
+                    boot_vga: true,
+                },
+                DrmDevice {
+                    nvidia_driver: false,
+                    boot_vga: false,
+                },
+            ],
+            false,
+        ));
+    }
+
+    #[test]
+    fn secondary_nvidia_device_does_not_trigger_workaround() {
+        assert!(!primary_renderer_is_nvidia(
+            &[
+                DrmDevice {
+                    nvidia_driver: false,
+                    boot_vga: true,
+                },
+                DrmDevice {
+                    nvidia_driver: true,
+                    boot_vga: false,
+                },
+            ],
+            false,
+        ));
+    }
+
+    #[test]
+    fn nvidia_offload_selects_secondary_nvidia_device() {
+        assert!(primary_renderer_is_nvidia(
+            &[
+                DrmDevice {
+                    nvidia_driver: false,
+                    boot_vga: true,
+                },
+                DrmDevice {
+                    nvidia_driver: true,
+                    boot_vga: false,
+                },
+            ],
+            true,
+        ));
+    }
+
+    #[test]
+    fn nouveau_device_does_not_trigger_workaround() {
+        assert!(!primary_renderer_is_nvidia(
+            &[DrmDevice {
+                nvidia_driver: false,
+                boot_vga: true,
+            }],
+            false,
         ));
     }
 }
