@@ -1,7 +1,6 @@
 //! Linux WebKitGTK renderer compatibility workarounds.
 
 use std::ffi::{CStr, CString, OsStr};
-use std::os::fd::{BorrowedFd, IntoRawFd};
 use std::os::raw::{c_char, c_int, c_void};
 use std::os::unix::fs::FileTypeExt;
 use std::path::Path;
@@ -30,9 +29,12 @@ pub fn configure() -> bool {
     let wayland_socket = inherited_wayland_socket
         .as_deref()
         .or(default_wayland_display.as_deref());
-    let wayland_display_for_probe = wayland_display
-        .as_deref()
-        .or(default_wayland_display.as_deref());
+    let wayland_display_for_probe = wayland_display.as_deref().or_else(|| {
+        inherited_wayland_socket
+            .is_none()
+            .then_some(default_wayland_display.as_deref())
+            .flatten()
+    });
     let x11_display = std::env::var("DISPLAY").ok();
     let gdk_backend = std::env::var("GDK_BACKEND").ok();
     let override_present = RENDERER_OVERRIDES
@@ -40,10 +42,7 @@ pub fn configure() -> bool {
         .any(|name| std::env::var_os(name).is_some());
 
     if !should_disable_dmabuf(
-        nvidia_renderer_present(
-            wayland_display_for_probe,
-            inherited_wayland_socket.as_deref(),
-        ),
+        nvidia_renderer_present(wayland_display_for_probe),
         session_type.as_deref(),
         wayland_display.as_deref(),
         wayland_socket,
@@ -125,10 +124,7 @@ struct DrmDevice {
     nvidia_driver: bool,
 }
 
-fn nvidia_renderer_present(
-    wayland_display: Option<&str>,
-    inherited_wayland_socket: Option<&str>,
-) -> bool {
+fn nvidia_renderer_present(wayland_display: Option<&str>) -> bool {
     let Ok(entries) = std::fs::read_dir("/sys/class/drm") else {
         return false;
     };
@@ -149,7 +145,7 @@ fn nvidia_renderer_present(
         && devices.iter().any(|device| !device.nvidia_driver);
     let active_egl_renderer =
         (mixed_gpu_system && compositor_card.is_none() && !nvidia_renderer_requested)
-            .then(|| wayland_egl_vendor_is_nvidia(wayland_display, inherited_wayland_socket))
+            .then(|| wayland_egl_vendor_is_nvidia(wayland_display))
             .flatten();
 
     primary_renderer_is_nvidia(
@@ -196,12 +192,8 @@ fn egl_vendor_manifest_selects_nvidia(path: &str) -> bool {
 /// Ask EGL which vendor it selects for a fresh connection to this Wayland
 /// display. This matches the renderer WebKitGTK will use more closely than PCI
 /// firmware flags do on hybrid-GPU systems.
-fn wayland_egl_vendor_is_nvidia(
-    wayland_display: Option<&str>,
-    inherited_wayland_socket: Option<&str>,
-) -> Option<bool> {
+fn wayland_egl_vendor_is_nvidia(wayland_display: Option<&str>) -> Option<bool> {
     type WlDisplayConnect = unsafe extern "C" fn(*const c_char) -> *mut c_void;
-    type WlDisplayConnectToFd = unsafe extern "C" fn(c_int) -> *mut c_void;
     type WlDisplayDisconnect = unsafe extern "C" fn(*mut c_void);
     type EglGetDisplay = unsafe extern "C" fn(*mut c_void) -> *mut c_void;
     type EglInitialize = unsafe extern "C" fn(*mut c_void, *mut c_int, *mut c_int) -> c_int;
@@ -217,8 +209,6 @@ fn wayland_egl_vendor_is_nvidia(
         let wayland = libloading::Library::new("libwayland-client.so.0").ok()?;
         let egl = libloading::Library::new("libEGL.so.1").ok()?;
         let wl_display_connect: WlDisplayConnect = *wayland.get(b"wl_display_connect\0").ok()?;
-        let wl_display_connect_to_fd: WlDisplayConnectToFd =
-            *wayland.get(b"wl_display_connect_to_fd\0").ok()?;
         let wl_display_disconnect: WlDisplayDisconnect =
             *wayland.get(b"wl_display_disconnect\0").ok()?;
         let egl_get_display: EglGetDisplay = *egl.get(b"eglGetDisplay\0").ok()?;
@@ -226,14 +216,8 @@ fn wayland_egl_vendor_is_nvidia(
         let egl_query_string: EglQueryString = *egl.get(b"eglQueryString\0").ok()?;
         let egl_terminate: EglTerminate = *egl.get(b"eglTerminate\0").ok()?;
 
-        let wl_display = if let Some(socket) = inherited_wayland_socket {
-            let raw_fd = socket.parse::<c_int>().ok().filter(|fd| *fd >= 0)?;
-            let owned_fd = BorrowedFd::borrow_raw(raw_fd).try_clone_to_owned().ok()?;
-            wl_display_connect_to_fd(owned_fd.into_raw_fd())
-        } else {
-            let display_name = CString::new(wayland_display?).ok()?;
-            wl_display_connect(display_name.as_ptr())
-        };
+        let display_name = CString::new(wayland_display?).ok()?;
+        let wl_display = wl_display_connect(display_name.as_ptr());
         if wl_display.is_null() {
             return None;
         }
