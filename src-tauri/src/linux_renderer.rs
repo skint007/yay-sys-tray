@@ -24,9 +24,9 @@ pub fn configure() -> bool {
     let session_type = std::env::var("XDG_SESSION_TYPE").ok();
     let wayland_display = std::env::var("WAYLAND_DISPLAY").ok();
     let inherited_wayland_socket = std::env::var("WAYLAND_SOCKET").ok();
-    let inherited_wayland_socket_present = inherited_wayland_socket
+    let inherited_wayland_socket_usable = inherited_wayland_socket
         .as_deref()
-        .is_some_and(|value| !value.trim().is_empty());
+        .is_some_and(inherited_wayland_socket_is_usable);
     let default_wayland_display = should_use_default_wayland_display(
         wayland_display.as_deref(),
         inherited_wayland_socket.as_deref(),
@@ -37,7 +37,7 @@ pub fn configure() -> bool {
         .as_deref()
         .filter(|value| !value.trim().is_empty())
         .or(default_wayland_display.as_deref());
-    let wayland_display_for_probe = (!inherited_wayland_socket_present)
+    let wayland_display_for_probe = (!inherited_wayland_socket_usable)
         .then_some(
             wayland_display
                 .as_deref()
@@ -50,7 +50,7 @@ pub fn configure() -> bool {
     let override_present = renderer_override_present();
 
     if !should_disable_dmabuf(
-        nvidia_renderer_present(wayland_display_for_probe, inherited_wayland_socket_present),
+        nvidia_renderer_present(wayland_display_for_probe, inherited_wayland_socket_usable),
         session_type.as_deref(),
         wayland_display.as_deref(),
         wayland_socket,
@@ -98,6 +98,24 @@ fn webkit_renderer_override_enabled(value: Option<&OsStr>) -> bool {
 
 fn nvidia_explicit_sync_override_enabled(value: Option<&str>) -> bool {
     value.is_some_and(|value| !value.trim().is_empty() && value.trim() != "0")
+}
+
+fn inherited_wayland_socket_is_usable(value: &str) -> bool {
+    let Ok(fd) = value.trim().parse::<c_int>() else {
+        return false;
+    };
+    if fd < 0 {
+        return false;
+    }
+
+    let mut metadata = std::mem::MaybeUninit::<libc::stat>::uninit();
+    // SAFETY: fstat only reads the borrowed descriptor and initializes the
+    // provided stat buffer on success. It does not consume or alter the fd.
+    if unsafe { libc::fstat(fd, metadata.as_mut_ptr()) } != 0 {
+        return false;
+    }
+    let mode = unsafe { metadata.assume_init() }.st_mode;
+    mode & libc::S_IFMT == libc::S_IFSOCK
 }
 
 #[derive(Clone, Copy)]
@@ -188,9 +206,10 @@ fn is_wayland_session_with_probes(
 }
 
 fn wayland_display_is_usable(wayland_display: Option<&str>, wayland_socket: Option<&str>) -> bool {
-    // GTK will consume an inherited socket directly. Opening or duplicating it
-    // here would share the protocol stream, so leave validation to GTK.
-    if std::env::var("WAYLAND_SOCKET").is_ok_and(|value| !value.trim().is_empty()) {
+    // GTK will consume an inherited socket directly. Validate the borrowed fd
+    // without opening or duplicating it, which would share its protocol stream.
+    if std::env::var("WAYLAND_SOCKET").is_ok_and(|value| inherited_wayland_socket_is_usable(&value))
+    {
         return true;
     }
 
@@ -543,7 +562,8 @@ mod tests {
     use super::{
         card_name_from_path_with_sysfs, default_wayland_socket_available,
         egl_vendor_list_selects_nvidia, first_available_card_from_device_list,
-        first_card_from_device_list, is_wayland_session_with_probes, mixed_gpu_renderer_is_nvidia,
+        first_card_from_device_list, inherited_wayland_socket_is_usable,
+        is_wayland_session_with_probes, mixed_gpu_renderer_is_nvidia,
         nvidia_explicit_sync_override_enabled, primary_renderer_is_nvidia, should_disable_dmabuf,
         should_disable_dmabuf_with_probes, should_use_default_wayland_display,
         webkit_renderer_override_enabled, DrmDevice, SessionEnvironment,
@@ -649,6 +669,30 @@ mod tests {
         assert!(!nvidia_explicit_sync_override_enabled(Some("")));
         assert!(!nvidia_explicit_sync_override_enabled(Some("0")));
         assert!(nvidia_explicit_sync_override_enabled(Some("1")));
+    }
+
+    #[test]
+    fn inherited_wayland_socket_must_be_a_live_socket_descriptor() {
+        use std::os::fd::AsRawFd;
+        use std::os::unix::net::UnixStream;
+
+        let (socket, _peer) = UnixStream::pair().unwrap();
+        assert!(inherited_wayland_socket_is_usable(
+            &socket.as_raw_fd().to_string()
+        ));
+
+        let path = std::env::temp_dir().join(format!(
+            "yay-sys-tray-wayland-fd-test-{}",
+            std::process::id()
+        ));
+        let file = std::fs::File::create(&path).unwrap();
+        assert!(!inherited_wayland_socket_is_usable(
+            &file.as_raw_fd().to_string()
+        ));
+        assert!(!inherited_wayland_socket_is_usable("-1"));
+        assert!(!inherited_wayland_socket_is_usable("not-a-fd"));
+
+        std::fs::remove_file(path).unwrap();
     }
 
     #[test]
