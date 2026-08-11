@@ -1,7 +1,6 @@
 //! Linux WebKitGTK renderer compatibility workarounds.
 
 use std::ffi::OsStr;
-use std::os::unix::fs::FileTypeExt;
 use std::path::Path;
 
 const RENDERER_OVERRIDES: [&str; 3] = [
@@ -53,8 +52,7 @@ fn default_wayland_socket_available(runtime_dir: Option<&OsStr>) -> bool {
     let Some(runtime_dir) = runtime_dir else {
         return false;
     };
-    std::fs::metadata(Path::new(runtime_dir).join("wayland-0"))
-        .is_ok_and(|metadata| metadata.file_type().is_socket())
+    Path::new(runtime_dir).join("wayland-0").exists()
 }
 
 fn should_disable_dmabuf(
@@ -327,19 +325,16 @@ mod tests {
 
     #[test]
     fn finds_libwayland_default_socket() {
-        use std::os::unix::net::UnixListener;
-
         let root = std::env::temp_dir().join(format!(
             "yay-sys-tray-wayland-socket-test-{}",
             std::process::id()
         ));
         std::fs::create_dir_all(&root).unwrap();
         let socket_path = root.join("wayland-0");
-        let socket = UnixListener::bind(&socket_path).unwrap();
+        std::fs::write(socket_path, []).unwrap();
 
         assert!(default_wayland_socket_available(Some(root.as_os_str())));
 
-        drop(socket);
         std::fs::remove_dir_all(root).unwrap();
     }
 
