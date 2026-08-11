@@ -89,18 +89,21 @@
     }
     for (const h of remoteHosts) {
       if (h.updates.length > 0) {
+        const blockedPkgs = new Set(
+          h.aur_helper_missing
+            ? h.updates.filter((u) => u.repository === AUR_REPO).map((u) => u.package)
+            : [],
+        );
         list.push({
           key: h.hostname,
           name: h.hostname,
           updates: h.updates,
           needsRestart: h.needs_restart,
           restartPkgs: h.restart_packages,
-          checkable: true,
-          blockedPkgs: new Set(
-            h.aur_helper_missing
-              ? h.updates.filter((u) => u.repository === AUR_REPO).map((u) => u.package)
-              : [],
-          ),
+          // A host with nothing applicable gets no bulk checkbox: "Update All
+          // Remote" would open a terminal for it that could do nothing.
+          checkable: h.updates.length > blockedPkgs.size,
+          blockedPkgs,
         });
       }
     }
@@ -281,7 +284,11 @@
   $effect(() => {
     const validKeys = new Set(hosts.map((h) => h.key));
 
-    const prunedChecked = checkedHosts.filter((k) => validKeys.has(k));
+    // Checked against the selectable hosts, not just the listed ones: a
+    // re-check can find a host has nothing left to apply, and it must not stay
+    // in the bulk update after that.
+    const selectableKeys = new Set(checkableHosts.map((h) => h.key));
+    const prunedChecked = checkedHosts.filter((k) => selectableKeys.has(k));
     if (prunedChecked.length !== checkedHosts.length) {
       checkedHosts = prunedChecked;
     }

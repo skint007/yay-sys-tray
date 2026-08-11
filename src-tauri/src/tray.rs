@@ -280,6 +280,11 @@ struct LinuxTray {
     icon: ksni::Icon,
     tooltip: String,
     update_count: u32,
+    /// Rows the window would show, which is not the same as pending work: a
+    /// remote host's AUR updates with no helper to apply them are listed but
+    /// never counted. The menu item opens on this, so the one window that can
+    /// explain them stays reachable.
+    listed_count: u32,
 }
 
 #[cfg(target_os = "linux")]
@@ -330,7 +335,7 @@ impl ksni::Tray for LinuxTray {
                 } else {
                     "Show Updates".to_string()
                 },
-                enabled: self.update_count > 0,
+                enabled: self.listed_count > 0,
                 activate: Box::new(|tray: &mut Self| open_window(&tray.app_handle, "updates")),
                 ..Default::default()
             }
@@ -378,6 +383,7 @@ fn setup_platform_tray(app: &tauri::App) -> Result<(), Box<dyn std::error::Error
         icon: image_to_ksni_icon(&initial_icon),
         tooltip: "No updates checked yet".to_string(),
         update_count: 0,
+        listed_count: 0,
     });
     let handle = service.handle();
 
@@ -683,6 +689,8 @@ async fn run_full_check(app_handle: tauri::AppHandle, fresh_for_minutes: Option<
             // but is not pending work (#29).
             let total_count = check_result.updates.len() as u32
                 + remote_hosts.iter().map(|h| h.actionable_count() as u32).sum::<u32>();
+            let listed_count = check_result.updates.len() as u32
+                + remote_hosts.iter().map(|h| h.updates.len() as u32).sum::<u32>();
             let old_count = *tray_state.previous_count.read().await;
             let all_remote_checks_succeeded = remote_hosts.len() == expected_remote_count
                 && remote_hosts.iter().all(|host| host.error.is_none());
@@ -702,7 +710,7 @@ async fn run_full_check(app_handle: tauri::AppHandle, fresh_for_minutes: Option<
             update_tray_state(&app_handle, &check_result, &remote_hosts, animations_enabled)
                 .await;
 
-            set_show_updates_label(&app_handle, total_count).await;
+            set_show_updates_label(&app_handle, total_count, listed_count).await;
 
             // Send notification if configured
             let should_notify = match notify_mode.as_str() {
@@ -854,18 +862,29 @@ async fn refresh_after_recheck(
     };
     let total_count = local.updates.len() as u32
         + remote.iter().map(|h| h.actionable_count() as u32).sum::<u32>();
+    let listed_count =
+        local.updates.len() as u32 + remote.iter().map(|h| h.updates.len() as u32).sum::<u32>();
 
     {
         let tray_state = app_handle.state::<TrayState>();
         *tray_state.previous_count.write().await = total_count;
     }
     update_tray_state(app_handle, local, remote, animations).await;
-    set_show_updates_label(app_handle, total_count).await;
+    set_show_updates_label(app_handle, total_count, listed_count).await;
 }
 
 /// Enable/disable the "Show Updates" menu item and surface the count in its
 /// label.
-async fn set_show_updates_label(app_handle: &tauri::AppHandle, total_count: u32) {
+///
+/// The count is the pending work; whether the item is enabled follows
+/// `listed_count`, everything the window would show. They differ when a remote
+/// host has AUR updates and no helper to apply them: nothing to do, but the
+/// window is the only place that says why, so it has to stay reachable.
+async fn set_show_updates_label(
+    app_handle: &tauri::AppHandle,
+    total_count: u32,
+    listed_count: u32,
+) {
     #[cfg(target_os = "linux")]
     {
         let tray_state = app_handle.state::<TrayState>();
@@ -875,7 +894,10 @@ async fn set_show_updates_label(app_handle: &tauri::AppHandle, total_count: u32)
             .unwrap_or_else(|e| e.into_inner())
             .clone();
         if let Some(handle) = handle {
-            handle.update(|tray| tray.update_count = total_count);
+            handle.update(|tray| {
+                tray.update_count = total_count;
+                tray.listed_count = listed_count;
+            });
         }
     }
     #[cfg(not(target_os = "linux"))]
@@ -886,7 +908,7 @@ async fn set_show_updates_label(app_handle: &tauri::AppHandle, total_count: u32)
             guard.clone()
         };
         if let Some(item) = item {
-            let _ = item.set_enabled(total_count > 0);
+            let _ = item.set_enabled(listed_count > 0);
             let _ = item.set_text(if total_count > 0 {
                 format!("Show Updates ({total_count})")
             } else {
