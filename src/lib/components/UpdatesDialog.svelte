@@ -558,9 +558,6 @@
         {#if checkedHosts.length > 0}
           <button class="btn cyan" onclick={runRemoteBulk}>Update All Remote ({checkedHosts.length})</button>
         {/if}
-        {#if activeHost?.needsRestart}
-          <button class="btn ghost" onclick={() => runPrimary(false)}>Update</button>
-        {/if}
         <div class="split" class:split-caret={activeHost?.needsRestart}>
           <button class="btn primary main" onclick={() => runPrimary(activeHost?.needsRestart ?? false)}>{primaryLabel}</button>
           {#if activeHost?.needsRestart}
