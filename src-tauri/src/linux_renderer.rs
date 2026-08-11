@@ -27,9 +27,12 @@ pub fn configure() -> bool {
     let inherited_wayland_socket_present = inherited_wayland_socket
         .as_deref()
         .is_some_and(|value| !value.trim().is_empty());
-    let default_wayland_display =
-        default_wayland_socket_available(std::env::var_os("XDG_RUNTIME_DIR").as_deref())
-            .then(|| "wayland-0".to_string());
+    let default_wayland_display = should_use_default_wayland_display(
+        wayland_display.as_deref(),
+        inherited_wayland_socket.as_deref(),
+        default_wayland_socket_available(std::env::var_os("XDG_RUNTIME_DIR").as_deref()),
+    )
+    .then(|| "wayland-0".to_string());
     let wayland_socket = inherited_wayland_socket
         .as_deref()
         .filter(|value| !value.trim().is_empty())
@@ -72,6 +75,14 @@ fn default_wayland_socket_available(runtime_dir: Option<&OsStr>) -> bool {
     };
     std::fs::metadata(Path::new(runtime_dir).join("wayland-0"))
         .is_ok_and(|metadata| metadata.file_type().is_socket())
+}
+
+fn should_use_default_wayland_display(
+    wayland_display: Option<&str>,
+    inherited_wayland_socket: Option<&str>,
+    default_socket_available: bool,
+) -> bool {
+    wayland_display.is_none() && inherited_wayland_socket.is_none() && default_socket_available
 }
 
 #[derive(Clone, Copy)]
@@ -254,8 +265,6 @@ fn nvidia_renderer_present(
         .collect();
     let nvidia_renderer_requested = std::env::var("__NV_PRIME_RENDER_OFFLOAD")
         .is_ok_and(|value| !value.trim().is_empty() && value.trim() != "0")
-        || std::env::var("__GLX_VENDOR_LIBRARY_NAME")
-            .is_ok_and(|value| value.eq_ignore_ascii_case("nvidia"))
         || std::env::var("__EGL_VENDOR_LIBRARY_FILENAMES")
             .is_ok_and(|value| egl_vendor_list_selects_nvidia(&value));
     let compositor_card =
@@ -519,7 +528,7 @@ mod tests {
         egl_vendor_list_selects_nvidia, first_available_card_from_device_list,
         first_card_from_device_list, is_wayland_session_with_probes, mixed_gpu_renderer_is_nvidia,
         primary_renderer_is_nvidia, should_disable_dmabuf, should_disable_dmabuf_with_probes,
-        DrmDevice, SessionEnvironment,
+        should_use_default_wayland_display, DrmDevice, SessionEnvironment,
     };
 
     fn device(card_name: &str, nvidia_driver: bool) -> DrmDevice {
@@ -601,6 +610,14 @@ mod tests {
         assert!(!default_wayland_socket_available(Some(root.as_os_str())));
 
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn default_wayland_display_is_only_used_when_connection_variables_are_absent() {
+        assert!(should_use_default_wayland_display(None, None, true));
+        assert!(!should_use_default_wayland_display(Some(""), None, true));
+        assert!(!should_use_default_wayland_display(None, Some(""), true));
+        assert!(!should_use_default_wayland_display(None, None, false));
     }
 
     #[test]
