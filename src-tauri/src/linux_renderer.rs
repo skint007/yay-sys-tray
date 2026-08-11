@@ -1,5 +1,7 @@
 //! Linux WebKitGTK renderer compatibility workarounds.
 
+use std::ffi::OsStr;
+use std::os::unix::fs::FileTypeExt;
 use std::path::Path;
 
 const RENDERER_OVERRIDES: [&str; 3] = [
@@ -19,7 +21,10 @@ const COMPOSITOR_DRM_DEVICE_VARS: [&str; 3] =
 pub fn configure() -> bool {
     let session_type = std::env::var("XDG_SESSION_TYPE").ok();
     let wayland_display = std::env::var("WAYLAND_DISPLAY").ok();
-    let wayland_socket = std::env::var("WAYLAND_SOCKET").ok();
+    let wayland_socket = std::env::var("WAYLAND_SOCKET").ok().or_else(|| {
+        default_wayland_socket_available(std::env::var_os("XDG_RUNTIME_DIR").as_deref())
+            .then(|| "wayland-0".to_string())
+    });
     let x11_display = std::env::var("DISPLAY").ok();
     let gdk_backend = std::env::var("GDK_BACKEND").ok();
     let override_present = RENDERER_OVERRIDES
@@ -42,6 +47,14 @@ pub fn configure() -> bool {
     // has spawned threads, so GTK and its WebKit subprocesses inherit it.
     std::env::set_var("WEBKIT_DISABLE_DMABUF_RENDERER", "1");
     true
+}
+
+fn default_wayland_socket_available(runtime_dir: Option<&OsStr>) -> bool {
+    let Some(runtime_dir) = runtime_dir else {
+        return false;
+    };
+    std::fs::metadata(Path::new(runtime_dir).join("wayland-0"))
+        .is_ok_and(|metadata| metadata.file_type().is_socket())
 }
 
 fn should_disable_dmabuf(
@@ -246,15 +259,17 @@ fn primary_renderer_is_nvidia(
             .any(|device| device.boot_vga && device.nvidia_driver)
     };
 
-    primary_device_is_nvidia || (devices.len() == 1 && nvidia_device_present)
+    let all_devices_are_nvidia =
+        !devices.is_empty() && devices.iter().all(|device| device.nvidia_driver);
+    primary_device_is_nvidia || all_devices_are_nvidia
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        egl_vendor_list_selects_nvidia, first_available_card_from_device_list,
-        first_card_from_device_list, is_wayland_session, primary_renderer_is_nvidia,
-        should_disable_dmabuf, DrmDevice,
+        default_wayland_socket_available, egl_vendor_list_selects_nvidia,
+        first_available_card_from_device_list, first_card_from_device_list, is_wayland_session,
+        primary_renderer_is_nvidia, should_disable_dmabuf, DrmDevice,
     };
 
     fn device(card_name: &str, nvidia_driver: bool, boot_vga: bool) -> DrmDevice {
@@ -308,6 +323,24 @@ mod tests {
             None,
             Some("wayland")
         ));
+    }
+
+    #[test]
+    fn finds_libwayland_default_socket() {
+        use std::os::unix::net::UnixListener;
+
+        let root = std::env::temp_dir().join(format!(
+            "yay-sys-tray-wayland-socket-test-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let socket_path = root.join("wayland-0");
+        let socket = UnixListener::bind(&socket_path).unwrap();
+
+        assert!(default_wayland_socket_available(Some(root.as_os_str())));
+
+        drop(socket);
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
@@ -453,6 +486,15 @@ mod tests {
     fn secondary_nvidia_device_does_not_trigger_workaround() {
         assert!(!primary_renderer_is_nvidia(
             &[device("card0", false, true), device("card1", true, false),],
+            None,
+            false,
+        ));
+    }
+
+    #[test]
+    fn unmarked_multi_gpu_nvidia_system_triggers_workaround() {
+        assert!(primary_renderer_is_nvidia(
+            &[device("card0", true, false), device("card1", true, false)],
             None,
             false,
         ));
