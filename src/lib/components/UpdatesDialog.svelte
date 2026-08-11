@@ -675,9 +675,6 @@
         {#if checkedHosts.length > 0}
           <button class="btn cyan" onclick={runRemoteBulk}>Update All Remote ({checkedHosts.length})</button>
         {/if}
-        {#if activeHost?.needsRestart}
-          <button class="btn ghost" onclick={() => runPrimary(false)} disabled={primaryDisabled}>Update</button>
-        {/if}
         <div class="split" class:split-caret={activeHost?.needsRestart}>
           <button
             class="btn primary main"
@@ -898,7 +895,6 @@
   .btn.primary:hover { background: linear-gradient(var(--ys-violet-400), var(--ys-violet-500)); }
   .btn:disabled { opacity: 0.45; cursor: not-allowed; }
   .btn.primary:disabled:hover { background: linear-gradient(var(--ys-violet-500), var(--ys-violet-600)); }
-  .btn.ghost:disabled:hover { border-color: var(--ys-line); color: var(--ys-text-muted); }
 
   .split { position: relative; display: flex; box-shadow: var(--ys-glow); border-radius: 19px; }
   /* Only flatten the main button's right corners when the caret segment is shown. */
