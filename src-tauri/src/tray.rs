@@ -35,6 +35,10 @@ pub struct TrayState {
     /// discovery leaves `remote_results` empty, which is indistinguishable from
     /// a fleet with no remote hosts unless it's recorded here.
     remote_discovery_ok: AtomicBool,
+    /// Bumped whenever the remote configuration changes. A scan that started
+    /// under an older generation describes a fleet nobody asked about any more,
+    /// so it may not mark the remote side as checked when it lands.
+    remote_config_generation: AtomicU64,
     /// Whether the most recent local check succeeded. A failed one deliberately
     /// leaves the previous `local_result` in place so the window still has
     /// something to show, so the result alone can't say how current it is.
@@ -76,6 +80,7 @@ impl TrayState {
             linux_tray: Mutex::new(None),
             refresh_lock: tokio::sync::Mutex::new(()),
             remote_discovery_ok: AtomicBool::new(true),
+            remote_config_generation: AtomicU64::new(0),
             local_check_ok: AtomicBool::new(true),
             full_check_in_progress: AtomicBool::new(false),
             window_open: Mutex::new(WindowOpenState::default()),
@@ -608,6 +613,13 @@ async fn run_full_check(app_handle: tauri::AppHandle, fresh_for_minutes: Option<
     log::info!("Starting update check");
     *refresh_state.last_check_attempt.write().await = Some(chrono::Local::now());
 
+    // Read alongside the config this scan will run under, so results that land
+    // after the remote settings changed can be recognised as describing a fleet
+    // that is no longer the configured one.
+    let scan_generation = refresh_state
+        .remote_config_generation
+        .load(Ordering::Acquire);
+
     let (
         animations_enabled,
         notify_mode,
@@ -652,10 +664,6 @@ async fn run_full_check(app_handle: tauri::AppHandle, fresh_for_minutes: Option<
         log::info!("Tailscale disabled or no tags configured");
         (Vec::new(), true)
     };
-    app_handle
-        .state::<TrayState>()
-        .remote_discovery_ok
-        .store(discovery_ok, Ordering::Release);
 
     // Announce the full host set so the UI can show queued/checking/done states.
     let mut host_list = vec![serde_json::json!({ "key": "local", "name": "Local" })];
@@ -703,6 +711,16 @@ async fn run_full_check(app_handle: tauri::AppHandle, fresh_for_minutes: Option<
     // The spin animation is superseded below: update_tray_state (Ok) and
     // update_tray_error (Err) each bump the animation generation, which stops it.
     let tray_state = app_handle.state::<TrayState>();
+
+    // Record what this scan learned about the remote fleet whichever way the
+    // local check went: the two halves fail independently. Hosts only count as
+    // the checked fleet if the remote settings haven't changed since the scan
+    // started, since they would then describe a fleet nobody asked about.
+    let config_unchanged =
+        tray_state.remote_config_generation.load(Ordering::Acquire) == scan_generation;
+    tray_state
+        .remote_discovery_ok
+        .store(discovery_ok && config_unchanged, Ordering::Release);
 
     match result {
         Ok(check_result) => {
@@ -805,8 +823,13 @@ async fn handle_update_finished(app_handle: tauri::AppHandle, scope: String, was
 }
 
 /// Mark the stored remote results as no longer describing the configured fleet,
-/// so nothing treats them as a checked one until the next full scan.
+/// so nothing treats them as a checked one until the next full scan. Bumping the
+/// generation also disarms a scan that is already in flight under the old
+/// configuration and would otherwise land as if it had checked the new one.
 pub fn invalidate_remote_scan(tray_state: &TrayState) {
+    tray_state
+        .remote_config_generation
+        .fetch_add(1, Ordering::AcqRel);
     tray_state.remote_discovery_ok.store(false, Ordering::Release);
 }
 
