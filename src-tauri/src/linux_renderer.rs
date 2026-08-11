@@ -19,6 +19,7 @@ const COMPOSITOR_DRM_DEVICE_VARS: [&str; 3] =
 pub fn configure() -> bool {
     let session_type = std::env::var("XDG_SESSION_TYPE").ok();
     let wayland_display = std::env::var("WAYLAND_DISPLAY").ok();
+    let x11_display = std::env::var("DISPLAY").ok();
     let gdk_backend = std::env::var("GDK_BACKEND").ok();
     let override_present = RENDERER_OVERRIDES
         .iter()
@@ -28,6 +29,7 @@ pub fn configure() -> bool {
         nvidia_renderer_present(),
         session_type.as_deref(),
         wayland_display.as_deref(),
+        x11_display.as_deref(),
         gdk_backend.as_deref(),
         override_present,
     ) {
@@ -44,36 +46,42 @@ fn should_disable_dmabuf(
     nvidia_renderer_present: bool,
     session_type: Option<&str>,
     wayland_display: Option<&str>,
+    x11_display: Option<&str>,
     gdk_backend: Option<&str>,
     override_present: bool,
 ) -> bool {
     nvidia_renderer_present
         && !override_present
-        && is_wayland_session(session_type, wayland_display, gdk_backend)
+        && is_wayland_session(session_type, wayland_display, x11_display, gdk_backend)
 }
 
 fn is_wayland_session(
     session_type: Option<&str>,
     wayland_display: Option<&str>,
+    x11_display: Option<&str>,
     gdk_backend: Option<&str>,
 ) -> bool {
+    let wayland_available = wayland_display.is_some_and(|value| !value.trim().is_empty())
+        || session_type.is_some_and(|value| value.eq_ignore_ascii_case("wayland"));
+    let x11_available = x11_display.is_some_and(|value| !value.trim().is_empty())
+        || session_type.is_some_and(|value| value.eq_ignore_ascii_case("x11"));
+
     if let Some(backends) = gdk_backend.filter(|value| !value.trim().is_empty()) {
-        let mut use_session_default = false;
         for backend in backends.split(',').map(str::trim) {
-            if backend.eq_ignore_ascii_case("wayland") {
+            if backend.eq_ignore_ascii_case("wayland") && wayland_available {
                 return true;
             }
+            if backend.eq_ignore_ascii_case("x11") && x11_available {
+                return false;
+            }
             if backend == "*" {
-                use_session_default = true;
+                return wayland_available;
             }
         }
-        if !use_session_default {
-            return false;
-        }
+        return false;
     }
 
-    session_type.is_some_and(|value| value.eq_ignore_ascii_case("wayland"))
-        || wayland_display.is_some_and(|value| !value.trim().is_empty())
+    wayland_available
 }
 
 #[derive(Debug, Clone)]
@@ -136,12 +144,18 @@ fn selected_compositor_card() -> Option<String> {
 }
 
 fn first_card_from_device_list(value: &str) -> Option<String> {
-    value
-        .split(':')
-        .map(str::trim)
-        .find(|path| !path.is_empty())
-        .and_then(|path| Path::new(path).file_name())
-        .map(|card| card.to_string_lossy().into_owned())
+    let value = value.trim();
+    let list_separator = value.char_indices().find_map(|(index, character)| {
+        (character == ':' && value[index + 1..].trim_start().starts_with('/')).then_some(index)
+    });
+    let path = value[..list_separator.unwrap_or(value.len())].trim();
+    if path.is_empty() {
+        return None;
+    }
+    let path = Path::new(path);
+    let resolved = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    let card = resolved.file_name()?.to_string_lossy();
+    is_drm_card(&card).then(|| card.into_owned())
 }
 
 fn primary_renderer_is_nvidia(
@@ -187,6 +201,7 @@ mod tests {
             Some("wayland"),
             Some("wayland-0"),
             None,
+            None,
             false,
         ));
     }
@@ -198,6 +213,7 @@ mod tests {
             None,
             Some("wayland-0"),
             None,
+            None,
             false,
         ));
     }
@@ -207,7 +223,8 @@ mod tests {
         assert!(should_disable_dmabuf(
             true,
             Some("x11"),
-            None,
+            Some("wayland-0"),
+            Some(":0"),
             Some("wayland,x11"),
             false,
         ));
@@ -219,8 +236,25 @@ mod tests {
             true,
             Some("wayland"),
             Some("wayland-0"),
+            Some(":0"),
             Some("x11"),
             false,
+        ));
+    }
+
+    #[test]
+    fn first_available_gdk_backend_takes_precedence() {
+        assert!(!is_wayland_session(
+            Some("wayland"),
+            Some("wayland-0"),
+            Some(":0"),
+            Some("x11,wayland"),
+        ));
+        assert!(is_wayland_session(
+            Some("wayland"),
+            Some("wayland-0"),
+            Some(":0"),
+            Some("wayland,x11"),
         ));
     }
 
@@ -229,9 +263,15 @@ mod tests {
         assert!(is_wayland_session(
             Some("wayland"),
             Some("wayland-0"),
+            Some(":0"),
             Some("*")
         ));
-        assert!(!is_wayland_session(Some("x11"), None, Some("x11,*")));
+        assert!(!is_wayland_session(
+            Some("x11"),
+            None,
+            Some(":0"),
+            Some("x11,*")
+        ));
     }
 
     #[test]
@@ -241,13 +281,21 @@ mod tests {
             Some("wayland"),
             Some("wayland-0"),
             None,
+            None,
             false,
         ));
     }
 
     #[test]
     fn skips_nvidia_x11_session() {
-        assert!(!should_disable_dmabuf(true, Some("x11"), None, None, false,));
+        assert!(!should_disable_dmabuf(
+            true,
+            Some("x11"),
+            None,
+            Some(":0"),
+            None,
+            false,
+        ));
     }
 
     #[test]
@@ -256,6 +304,7 @@ mod tests {
             true,
             Some("wayland"),
             Some("wayland-0"),
+            None,
             None,
             true,
         ));
@@ -304,6 +353,28 @@ mod tests {
             Some("card1")
         );
         assert_eq!(first_card_from_device_list("  "), None);
+    }
+
+    #[test]
+    fn resolves_persistent_compositor_device_symlink() {
+        use std::os::unix::fs::symlink;
+
+        let root = std::env::temp_dir().join(format!(
+            "yay-sys-tray-drm-device-test-{}",
+            std::process::id()
+        ));
+        let by_path = root.join("dev/dri/by-path");
+        std::fs::create_dir_all(&by_path).unwrap();
+        std::fs::write(root.join("dev/dri/card1"), []).unwrap();
+        let persistent_path = by_path.join("pci-0000:01:00.0-card");
+        symlink("../card1", &persistent_path).unwrap();
+
+        assert_eq!(
+            first_card_from_device_list(&persistent_path.to_string_lossy()).as_deref(),
+            Some("card1")
+        );
+
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
