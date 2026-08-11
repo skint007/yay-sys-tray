@@ -38,11 +38,19 @@ jobs:
 
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
 
       - name: Cache Rust build
         uses: Swatinem/rust-cache@v2
         with:
           workspaces: src-tauri
+
+      - name: Run clippy
+        # Shares the compilation cache with the tests and the release build
+        # below, so a strict lint pass costs little beyond the lint itself.
+        working-directory: src-tauri
+        run: cargo clippy --all-targets -- -D warnings
 
       - name: Set up pnpm
         uses: pnpm/action-setup@v6

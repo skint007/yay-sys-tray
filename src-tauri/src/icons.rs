@@ -17,8 +17,10 @@ fn fontdb() -> Arc<resvg::usvg::fontdb::Database> {
 }
 
 fn render_svg(svg: &str) -> Image<'static> {
-    let mut opt = resvg::usvg::Options::default();
-    opt.fontdb = fontdb();
+    let opt = resvg::usvg::Options {
+        fontdb: fontdb(),
+        ..Default::default()
+    };
     let tree = resvg::usvg::Tree::from_str(svg, &opt).expect("Failed to parse SVG");
     let size = tree.size();
     let mut pixmap =
