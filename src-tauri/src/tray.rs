@@ -31,6 +31,10 @@ pub struct TrayState {
     /// concurrent re-checks that mutate the (single-threaded, non-thread-safe)
     /// GTK tray from multiple worker threads at the same time and crash.
     refresh_lock: tokio::sync::Mutex<()>,
+    /// Whether the last full scan managed to query the tailnet. A failed
+    /// discovery leaves `remote_results` empty, which is indistinguishable from
+    /// a fleet with no remote hosts unless it's recorded here.
+    remote_discovery_ok: AtomicBool,
     /// Rejects duplicate full scans before they can queue on `refresh_lock`.
     /// Targeted post-update refreshes still serialize through `refresh_lock`,
     /// but never count as a full scan for the tray click freshness window.
@@ -67,6 +71,7 @@ impl TrayState {
             #[cfg(target_os = "linux")]
             linux_tray: Mutex::new(None),
             refresh_lock: tokio::sync::Mutex::new(()),
+            remote_discovery_ok: AtomicBool::new(true),
             full_check_in_progress: AtomicBool::new(false),
             window_open: Mutex::new(WindowOpenState::default()),
             anim_generation: AtomicU64::new(0),
@@ -622,18 +627,30 @@ async fn run_full_check(app_handle: tauri::AppHandle, fresh_for_minutes: Option<
 
     // Discover the remote hosts up front so the Updates window can render the
     // full scan list (local first, then each tagged peer) and track progress.
-    let remote_hostnames = if tailscale_enabled && !tailscale_tags.is_empty() {
+    // `discovery_ok` is false only when the tailnet itself couldn't be queried —
+    // an unreachable tailnet must not read as "this fleet has no remote hosts".
+    let (remote_hostnames, discovery_ok) = if tailscale_enabled && !tailscale_tags.is_empty() {
         let tags: Vec<String> = tailscale_tags
             .split(',')
             .map(|t| t.trim().to_string())
             .filter(|t| !t.is_empty())
             .collect();
         log::info!("Discovering Tailscale peers with tags: {:?}", tags);
-        tailscale::discover_peers(&tags).await
+        match tailscale::discover_peers(&tags).await {
+            Some(hosts) => (hosts, true),
+            None => {
+                log::warn!("Tailscale peer discovery failed");
+                (Vec::new(), false)
+            }
+        }
     } else {
         log::info!("Tailscale disabled or no tags configured");
-        Vec::new()
+        (Vec::new(), true)
     };
+    app_handle
+        .state::<TrayState>()
+        .remote_discovery_ok
+        .store(discovery_ok, Ordering::Release);
 
     // Announce the full host set so the UI can show queued/checking/done states.
     let mut host_list = vec![serde_json::json!({ "key": "local", "name": "Local" })];
@@ -780,11 +797,19 @@ async fn handle_update_finished(app_handle: tauri::AppHandle, scope: String, was
     }
 }
 
-/// True when the latest results leave nothing to act on: no pending updates
-/// anywhere, no unreachable host and no AUR outage. Errors deliberately count as
-/// "not clean" — an empty update list that only means "we couldn't look" is not
-/// an up-to-date system, and the warning is worth reading.
-fn fleet_is_clean(local: Option<&CheckResult>, remote: &[HostResult]) -> bool {
+/// True when the latest results leave nothing to act on: the tailnet was
+/// reachable, no updates are pending anywhere, no host errored and no AUR
+/// outage. Anything unknown deliberately counts as "not clean" — an empty
+/// update list that only means "we couldn't look" is not an up-to-date system,
+/// and the warning is worth reading.
+fn fleet_is_clean(
+    local: Option<&CheckResult>,
+    remote: &[HostResult],
+    discovery_ok: bool,
+) -> bool {
+    if !discovery_ok {
+        return false;
+    }
     let Some(local) = local else { return false };
     if !local.updates.is_empty() || local.aur_error.is_some() {
         return false;
@@ -826,7 +851,8 @@ async fn maybe_close_after_update(app_handle: &tauri::AppHandle) {
 
     let local = tray_state.local_result.read().await.clone();
     let remote = tray_state.remote_results.read().await.clone();
-    if !fleet_is_clean(local.as_ref(), &remote) {
+    let discovery_ok = tray_state.remote_discovery_ok.load(Ordering::Acquire);
+    if !fleet_is_clean(local.as_ref(), &remote, discovery_ok) {
         return;
     }
 
@@ -1274,21 +1300,33 @@ mod tests {
 
     #[test]
     fn nothing_pending_anywhere_is_clean() {
-        assert!(fleet_is_clean(Some(&local(vec![])), &[host("arch-serv", vec![])]));
+        assert!(fleet_is_clean(
+            Some(&local(vec![])),
+            &[host("arch-serv", vec![])],
+            true
+        ));
     }
 
     #[test]
     fn pending_updates_are_not_clean() {
-        assert!(!fleet_is_clean(Some(&local(vec![update("jq")])), &[]));
+        assert!(!fleet_is_clean(Some(&local(vec![update("jq")])), &[], true));
         assert!(!fleet_is_clean(
             Some(&local(vec![])),
-            &[host("arch-serv", vec![update("jq")])]
+            &[host("arch-serv", vec![update("jq")])],
+            true
         ));
     }
 
     #[test]
     fn a_check_that_never_ran_is_not_clean() {
-        assert!(!fleet_is_clean(None, &[]));
+        assert!(!fleet_is_clean(None, &[], true));
+    }
+
+    #[test]
+    fn an_unqueryable_tailnet_is_not_clean() {
+        // Discovery failed, so the empty remote list means "we never saw the
+        // fleet", not "the fleet is up to date".
+        assert!(!fleet_is_clean(Some(&local(vec![])), &[], false));
     }
 
     #[test]
@@ -1297,15 +1335,15 @@ mod tests {
         // as an up-to-date system.
         let mut unreachable = host("arch-serv", vec![]);
         unreachable.error = Some("ssh: connect timed out".to_string());
-        assert!(!fleet_is_clean(Some(&local(vec![])), &[unreachable]));
+        assert!(!fleet_is_clean(Some(&local(vec![])), &[unreachable], true));
 
         let mut aur_down = local(vec![]);
         aur_down.aur_error = Some("AUR unreachable".to_string());
-        assert!(!fleet_is_clean(Some(&aur_down), &[]));
+        assert!(!fleet_is_clean(Some(&aur_down), &[], true));
 
         let mut host_aur_down = host("arch-serv", vec![]);
         host_aur_down.aur_error = Some("AUR unreachable".to_string());
-        assert!(!fleet_is_clean(Some(&local(vec![])), &[host_aur_down]));
+        assert!(!fleet_is_clean(Some(&local(vec![])), &[host_aur_down], true));
     }
 
     #[cfg(target_os = "linux")]
