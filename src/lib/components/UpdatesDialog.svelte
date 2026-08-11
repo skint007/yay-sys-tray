@@ -165,9 +165,10 @@
   });
 
   let visiblePkgs = $derived(grouped.visible.map((u) => u.package));
+  let selectedSet = $derived(new Set(activeSelected));
   let selCount = $derived(activeSelected.length);
-  let allSelected = $derived(visiblePkgs.length > 0 && visiblePkgs.every((p) => activeSelected.includes(p)));
-  let pkgsIndeterminate = $derived(!allSelected && visiblePkgs.some((p) => activeSelected.includes(p)));
+  let allSelected = $derived(visiblePkgs.length > 0 && visiblePkgs.every((p) => selectedSet.has(p)));
+  let pkgsIndeterminate = $derived(!allSelected && visiblePkgs.some((p) => selectedSet.has(p)));
   let primaryLabel = $derived.by(() => {
     if (!activeHost) return "Update";
     const base = selCount > 0 ? "Update Selected" : "Update All";
@@ -316,18 +317,38 @@
     selectedByHost[activeKey] = cur.includes(pkg) ? cur.filter((p) => p !== pkg) : [...cur, pkg];
   }
 
-  function toggleSelectAll() {
-    // Only add/remove the packages currently visible under the search filter —
-    // selections of filtered-out packages must survive so "Update Selected"
-    // acts on the full set the user built, not just what's on screen.
+  // Only add/remove the packages currently visible under the search filter —
+  // selections of filtered-out packages must survive so "Update Selected" acts
+  // on the full set the user built, not just what's on screen.
+  function setSelected(pkgs: string[], on: boolean) {
     const cur = selectedByHost[activeKey] ?? [];
-    if (allSelected) {
-      selectedByHost[activeKey] = cur.filter((p) => !visiblePkgs.includes(p));
-    } else {
+    if (on) {
       const set = new Set(cur);
-      for (const p of visiblePkgs) set.add(p);
+      for (const p of pkgs) set.add(p);
       selectedByHost[activeKey] = [...set];
+    } else {
+      const drop = new Set(pkgs);
+      selectedByHost[activeKey] = cur.filter((p) => !drop.has(p));
     }
+  }
+
+  function toggleSelectAll() {
+    setSelected(visiblePkgs, !allSelected);
+  }
+
+  // A group header's checkbox covers only that group's visible rows, so the
+  // top-level select-all and the group boxes stay consistent with each other:
+  // every group checked === all checked.
+  function groupState(updates: UpdateInfo[]) {
+    const n = updates.reduce((acc, u) => acc + (selectedSet.has(u.package) ? 1 : 0), 0);
+    return { all: updates.length > 0 && n === updates.length, some: n > 0 && n < updates.length };
+  }
+
+  function toggleGroup(updates: UpdateInfo[]) {
+    setSelected(
+      updates.map((u) => u.package),
+      !groupState(updates).all,
+    );
   }
 
   function handleRemove(pkg: string, flags: string) {
@@ -512,8 +533,32 @@
       {/if}
 
       <main class="list">
+        <div class="list-head">
+          <label class="select-all">
+            <input
+              type="checkbox"
+              class="ys-check"
+              checked={allSelected}
+              indeterminate={pkgsIndeterminate}
+              onchange={toggleSelectAll}
+              aria-label="Select all packages"
+            />
+            <span>SELECT ALL</span>
+          </label>
+          <span class="sel-label">{selCount} selected</span>
+        </div>
         {#if grouped.restart.length > 0}
-          <div class="section restart"><span class="sdot"></span>RESTART REQUIRED</div>
+          <label class="section restart">
+            <input
+              type="checkbox"
+              class="ys-check sm"
+              checked={groupState(grouped.restart).all}
+              indeterminate={groupState(grouped.restart).some}
+              onchange={() => toggleGroup(grouped.restart)}
+              aria-label="Select all restart-required packages"
+            />
+            <span class="sdot"></span>RESTART REQUIRED
+          </label>
           {#each grouped.restart as u (u.package)}
             <UpdateCard
               update={u}
@@ -527,10 +572,18 @@
           {/each}
         {/if}
         {#each grouped.repos as r (r.name)}
-          <div class="section repo" style={`--c: ${repoColorVar(r.name, "--ys-pending")}`}>
+          <label class="section repo" style={`--c: ${repoColorVar(r.name, "--ys-pending")}`}>
+            <input
+              type="checkbox"
+              class="ys-check sm"
+              checked={groupState(r.updates).all}
+              indeterminate={groupState(r.updates).some}
+              onchange={() => toggleGroup(r.updates)}
+              aria-label={`Select all ${r.name} packages`}
+            />
             <span class="sdot"></span>{r.name.toUpperCase()}
             <span class="scount">{r.updates.length}</span>
-          </div>
+          </label>
           {#each r.updates as u (u.package)}
             <UpdateCard
               update={u}
@@ -547,8 +600,6 @@
 
     <footer class="footer">
       <div class="foot-left">
-        <input type="checkbox" class="ys-check" checked={allSelected} indeterminate={pkgsIndeterminate} onchange={toggleSelectAll} aria-label="Select all" />
-        <span class="sel-label">{selCount} selected</span>
         <div class="seg">
           <button class:active={density === "roomy"} onclick={() => (density = "roomy")}>Roomy</button>
           <button class:active={density === "compact"} onclick={() => (density = "compact")}>Compact</button>
@@ -713,14 +764,31 @@
   .host.active .host-count { color: var(--ys-violet-text); background: color-mix(in srgb, var(--ys-violet-600) 22%, transparent); }
   .host.reboot .host-count { color: var(--ys-danger); background: color-mix(in srgb, var(--ys-danger) 18%, transparent); }
 
-  .list { flex: 1; min-width: 0; overflow-y: auto; display: flex; flex-direction: column; gap: 9px; padding: 2px 2px 8px; }
+  .list { flex: 1; min-width: 0; overflow-y: auto; display: flex; flex-direction: column; gap: 9px; padding: 0 2px 8px; }
+  /* Pinned to the top of the scroller so select-all stays reachable no matter
+     how far down the list you are. The negative margins let its background
+     cover the list's side padding, which rows would otherwise scroll through. */
+  .list-head {
+    position: sticky; top: 0; z-index: 2;
+    display: flex; align-items: center; justify-content: space-between; gap: 12px;
+    margin: 0 -2px; padding: 4px 2px 6px;
+    background: var(--ys-ground);
+  }
+  .select-all {
+    display: flex; align-items: center; gap: 9px; cursor: pointer;
+    font-family: var(--font-mono); font-weight: 600; font-size: 11px;
+    letter-spacing: 1.5px; color: var(--ys-text-dim);
+  }
+  .select-all:hover { color: var(--ys-text-muted); }
+  .sel-label { font-family: var(--font-mono); font-weight: 600; font-size: 12px; color: var(--ys-text-muted); }
   .section {
     display: flex; align-items: center; gap: 8px;
     font-family: var(--font-mono); font-weight: 600; font-size: 11px;
     letter-spacing: 2px; color: var(--ys-text-dim);
     margin-top: 6px; padding-left: 2px;
+    cursor: pointer;
   }
-  .section:first-child { margin-top: 0; }
+  .section:first-of-type { margin-top: 0; }
   .sdot { width: 6px; height: 6px; border-radius: 50%; }
   .section.restart { color: var(--ys-danger); }
   .section.restart .sdot { background: var(--ys-danger); }
@@ -737,7 +805,6 @@
     background: var(--ys-titlebar); border-top: 1px solid var(--ys-line-softer);
   }
   .foot-left { display: flex; align-items: center; gap: 12px; }
-  .sel-label { font-family: var(--font-mono); font-weight: 600; font-size: 12px; color: var(--ys-text-muted); }
   .foot-right { display: flex; align-items: center; gap: 10px; }
 
   .seg { display: flex; background: var(--ys-surface); border: 1px solid var(--ys-line); border-radius: 999px; padding: 3px; gap: 2px; }
