@@ -22,6 +22,11 @@ export const OFFICIAL_REPOS = [
 // with the grouping in UpdatesDialog so the rank below can't desync from it.
 export const UNKNOWN_REPO = "other";
 
+// The repo name every AUR update carries — matches AUR_REPO in
+// src-tauri/src/aur.rs. Shared so the "needs an AUR helper" grouping and the
+// rank below key off the same string.
+export const AUR_REPO = "aur";
+
 // Rank tiers, derived from the list length so they can never collide with an
 // official repo's index: official repos lead in the order above, then custom
 // repos (e.g. paw, alphabetized by the caller), then AUR, then unknown last.
@@ -32,7 +37,7 @@ const TIER_UNKNOWN = TIER_CUSTOM + 2;
 export function repoRank(repo: string): number {
   const i = OFFICIAL_REPOS.indexOf(repo);
   if (i !== -1) return i;
-  if (repo === "aur") return TIER_AUR;
+  if (repo === AUR_REPO) return TIER_AUR;
   if (repo === UNKNOWN_REPO) return TIER_UNKNOWN;
   return TIER_CUSTOM;
 }

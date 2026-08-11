@@ -32,9 +32,9 @@ const config = {
 const checkResult = {
   local: { updates: mkUpdates(), needs_restart: true, restart_packages: ["linux", "systemd"], reboot_info: null, aur_error: null },
   remote: [
-    { hostname: "arch-serv", updates: mkUpdates().slice(0, 4), needs_restart: true, restart_packages: ["linux"], error: null, aur_error: null },
-    { hostname: "arch-serv-gpu", updates: mkUpdates().slice(2, 5), needs_restart: false, restart_packages: [], error: null, aur_error: null },
-    { hostname: "uswest-arch-dns3", updates: mkUpdates().slice(3), needs_restart: true, restart_packages: ["systemd"], error: null, aur_error: null },
+    { hostname: "arch-serv", updates: mkUpdates().slice(0, 4), needs_restart: true, restart_packages: ["linux"], error: null, aur_error: null, aur_helper_missing: false },
+    { hostname: "arch-serv-gpu", updates: mkUpdates().slice(2, 5), needs_restart: false, restart_packages: [], error: null, aur_error: null, aur_helper_missing: false },
+    { hostname: "uswest-arch-dns3", updates: mkUpdates().slice(3), needs_restart: true, restart_packages: ["systemd"], error: null, aur_error: null, aur_helper_missing: false },
   ],
 };
 
@@ -94,10 +94,36 @@ const aurErrorFleetResult = {
     {
       hostname: "arch-serv-remote", updates: [], needs_restart: false, restart_packages: [],
       error: null, aur_error: "pacman -Qm over SSH failed: Connection timed out",
+      aur_helper_missing: false,
     },
     {
       hostname: "arch-serv-gpu", updates: mkUpdates().slice(0, 2), needs_restart: false,
-      restart_packages: [], error: null, aur_error: null,
+      restart_packages: [], error: null, aur_error: null, aur_helper_missing: false,
+    },
+  ],
+};
+
+// Surface #9 — a host with AUR updates and no AUR helper (#29). The ARM box has
+// nothing but blocked updates, which is the case that used to read as "there is
+// nothing to do": its own count is 0, the blocked ones are listed apart, and the
+// primary button has nothing to offer.
+const noHelperResult = {
+  local: {
+    updates: mkUpdates().slice(0, 2), needs_restart: false, restart_packages: [],
+    reboot_info: null, aur_error: null,
+  },
+  remote: [
+    {
+      hostname: "arch-serv", updates: mkUpdates().slice(4, 7), needs_restart: false,
+      restart_packages: [], error: null, aur_error: null, aur_helper_missing: true,
+    },
+    {
+      hostname: "eucentral-arch-dns",
+      updates: [
+        { package: "oh-my-posh-bin", old_version: "29.19.0-1", new_version: "30.0.0-1", description: "prompt theme engine", repository: "aur", url: "https://aur.archlinux.org" },
+      ],
+      needs_restart: false, restart_packages: [], error: null, aur_error: null,
+      aur_helper_missing: true,
     },
   ],
 };
@@ -111,6 +137,7 @@ mockIPC((cmd: string) => {
     case "get_check_result":
       if (view === "aurerror") return aurErrorResult;
       if (view === "aurerror-fleet") return aurErrorFleetResult;
+      if (view === "nohelper") return noHelperResult;
       return checkResult;
     case "discover_tailscale_tags":
       return ["admin", "arch", "cloud", "desktop", "dns", "kvm", "laptop", "linux", "mobile", "router", "server", "windows"];
@@ -127,6 +154,7 @@ document.documentElement.setAttribute("data-theme", `skint007-${params.get("them
 const sizes: Record<string, [number, number]> = {
   updates: [920, 620], settings: [560, 690], about: [480, 460], deptree: [720, 560],
   checking: [920, 620], aurerror: [920, 620], "aurerror-fleet": [920, 620],
+  nohelper: [920, 620],
 };
 const [w, h] = sizes[view] ?? [920, 620];
 const target = document.getElementById("app")!;

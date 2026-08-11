@@ -9,6 +9,8 @@
     selected = false,
     compact = false,
     restart = false,
+    blocked = false,
+    blockedReason = "",
     onToggle,
     onremove,
     onShowDeps,
@@ -17,6 +19,10 @@
     selected?: boolean;
     compact?: boolean;
     restart?: boolean;
+    /** Nothing here can apply this update — the checkbox is disabled and the
+     * card says why, instead of offering work that would silently do nothing. */
+    blocked?: boolean;
+    blockedReason?: string;
     onToggle?: () => void;
     onremove?: (pkg: string, flags: string) => void;
     onShowDeps?: (reverse: boolean) => void;
@@ -30,11 +36,13 @@
   }
 </script>
 
-<div class="pkg-card" class:selected class:compact>
+<div class="pkg-card" class:selected class:compact class:blocked>
   <input
     type="checkbox"
     class="ys-check"
-    checked={selected}
+    checked={selected && !blocked}
+    disabled={blocked}
+    title={blocked ? blockedReason : undefined}
     onchange={() => onToggle?.()}
     aria-label={`Select ${update.package}`}
   />
@@ -49,6 +57,9 @@
       {/if}
       {#if restart}
         <span class="pbadge restart">restart</span>
+      {/if}
+      {#if blocked}
+        <span class="pbadge blocked-badge" title={blockedReason}>not applicable</span>
       {/if}
     </div>
     <VersionDiff oldVersion={update.old_version} newVersion={update.new_version} {compact} />
@@ -104,6 +115,11 @@
   .pkg-card.compact { padding: 6px 13px; gap: 10px; border-radius: 11px; }
   .pkg-card:hover { border-color: var(--ys-violet-500); background: var(--ys-surface); }
   .pkg-card.selected { border-color: var(--ys-violet-600); }
+  /* Dashed edge and a muted name read as "listed, but not work you can do" —
+     the card keeps its actions, since removing the package still works. */
+  .pkg-card.blocked { border-style: dashed; }
+  .pkg-card.blocked .pkg { color: var(--ys-text-muted); }
+  .pkg-card.blocked .ys-check { cursor: not-allowed; opacity: 0.45; }
 
   .info { flex: 1; min-width: 0; }
   .name-row { display: flex; align-items: center; gap: 8px; margin-bottom: 3px; }
@@ -133,6 +149,12 @@
   .restart {
     color: var(--ys-danger);
     background: color-mix(in srgb, var(--ys-danger) 14%, transparent);
+  }
+  .blocked-badge {
+    color: var(--ys-text-muted);
+    background: color-mix(in srgb, var(--ys-pending) 14%, transparent);
+    border: 1px solid color-mix(in srgb, var(--ys-pending) 40%, transparent);
+    padding: 1px 6px;
   }
 
   .cluster {

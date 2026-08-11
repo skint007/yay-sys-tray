@@ -32,6 +32,9 @@ export interface HostResult {
   /** Set when this host's AUR check failed. Its repo updates are still listed
    * alongside; mirrors CheckResult.aur_error for the local check. */
   aur_error: string | null;
+  /** The host has AUR updates but no yay to apply them with, so they are listed
+   * as not applicable rather than as pending work. */
+  aur_helper_missing: boolean;
 }
 
 export interface FullCheckResult {
