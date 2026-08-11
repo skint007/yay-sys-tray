@@ -175,6 +175,24 @@ fn local_reboot_cmd(passwordless: bool) -> &'static str {
     }
 }
 
+/// What kind of run a terminal was carrying. Both kinds re-check the target
+/// afterwards, but only an update run can satisfy "close the window after
+/// updating" — removing a package is not an update.
+#[derive(Clone, Copy)]
+enum FinishedAction {
+    Update,
+    Remove,
+}
+
+impl FinishedAction {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Update => "update",
+            Self::Remove => "remove",
+        }
+    }
+}
+
 struct TermCfg {
     terminal: String,
     noconfirm: bool,
@@ -214,7 +232,7 @@ pub async fn run_local_update(app_handle: tauri::AppHandle, restart: bool) {
         cmd
     };
 
-    spawn_with(app_handle, prefix, yay_cmd, "local".to_string()).await;
+    spawn_with(app_handle, prefix, yay_cmd, "local".to_string(), FinishedAction::Update).await;
 }
 
 /// Update only the selected local packages (`yay -S <pkgs>`).
@@ -244,7 +262,7 @@ pub async fn run_local_update_packages(
         cmd
     };
 
-    spawn_with(app_handle, prefix, yay_cmd, "local".to_string()).await;
+    spawn_with(app_handle, prefix, yay_cmd, "local".to_string(), FinishedAction::Update).await;
 }
 
 /// Launch a remote full system update via SSH in a terminal.
@@ -258,7 +276,7 @@ pub async fn run_remote_update(app_handle: tauri::AppHandle, hostname: &str, res
         reboot_chain(restart, "sudo reboot", cfg.delay),
     );
 
-    spawn_with(app_handle, prefix, ssh_argv(target, cmd), hostname.to_string()).await;
+    spawn_with(app_handle, prefix, ssh_argv(target, cmd), hostname.to_string(), FinishedAction::Update).await;
 }
 
 /// Update only the selected packages on a remote host. `selected` is every
@@ -284,7 +302,7 @@ pub async fn run_remote_update_packages(
         reboot_chain(restart, "sudo reboot", cfg.delay),
     );
 
-    spawn_with(app_handle, prefix, ssh_argv(target, cmd), hostname.to_string()).await;
+    spawn_with(app_handle, prefix, ssh_argv(target, cmd), hostname.to_string(), FinishedAction::Update).await;
 }
 
 /// Remove a local package in a terminal.
@@ -297,7 +315,7 @@ pub async fn run_remove(app_handle: tauri::AppHandle, package: &str, flags: &str
         yay_cmd.push("--noconfirm".to_string());
     }
 
-    spawn_with(app_handle, prefix, yay_cmd, "local".to_string()).await;
+    spawn_with(app_handle, prefix, yay_cmd, "local".to_string(), FinishedAction::Remove).await;
 }
 
 /// Remove a package on a remote host via SSH.
@@ -315,7 +333,7 @@ pub async fn run_remote_remove(
     let base = format!("sudo pacman -{flags} {package}");
     let cmd = build_shell_cmd(&base, cfg.noconfirm, None);
 
-    spawn_with(app_handle, prefix, ssh_argv(target, cmd), hostname.to_string()).await;
+    spawn_with(app_handle, prefix, ssh_argv(target, cmd), hostname.to_string(), FinishedAction::Remove).await;
 }
 
 async fn spawn_with(
@@ -323,16 +341,23 @@ async fn spawn_with(
     prefix: Vec<String>,
     cmd: Vec<String>,
     scope: String,
+    action: FinishedAction,
 ) {
     let mut full = prefix;
     full.extend(cmd);
-    spawn_and_wait(app_handle, full, scope).await;
+    spawn_and_wait(app_handle, full, scope, action).await;
 }
 
 /// Spawn a terminal command, wait for it to finish, then emit update-finished
 /// carrying the scope ("local" or a hostname) so only that target gets
-/// re-checked rather than the whole fleet.
-async fn spawn_and_wait(app_handle: tauri::AppHandle, cmd: Vec<String>, scope: String) {
+/// re-checked rather than the whole fleet, plus the action that ran so a
+/// removal is never mistaken for a completed update.
+async fn spawn_and_wait(
+    app_handle: tauri::AppHandle,
+    cmd: Vec<String>,
+    scope: String,
+    action: FinishedAction,
+) {
     if cmd.is_empty() {
         return;
     }
@@ -343,7 +368,10 @@ async fn spawn_and_wait(app_handle: tauri::AppHandle, cmd: Vec<String>, scope: S
         Ok(mut child) => {
             tauri::async_runtime::spawn(async move {
                 let _ = child.wait().await;
-                let _ = app_handle.emit("update-finished", serde_json::json!({ "scope": scope }));
+                let _ = app_handle.emit(
+                    "update-finished",
+                    serde_json::json!({ "scope": scope, "action": action.as_str() }),
+                );
             });
         }
         Err(e) => log::error!("Failed to spawn terminal: {e}"),

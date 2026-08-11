@@ -189,13 +189,19 @@ pub fn setup_tray(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     // host, or "local") instead of rescanning the whole fleet every time.
     let handle = app.handle().clone();
     app.listen("update-finished", move |event| {
-        let scope = serde_json::from_str::<serde_json::Value>(event.payload())
-            .ok()
-            .and_then(|v| v.get("scope").and_then(|s| s.as_str()).map(String::from))
-            .unwrap_or_else(|| "local".to_string());
+        let payload = serde_json::from_str::<serde_json::Value>(event.payload()).ok();
+        let field = |name: &str| {
+            payload
+                .as_ref()
+                .and_then(|v| v.get(name).and_then(|s| s.as_str()).map(String::from))
+        };
+        let scope = field("scope").unwrap_or_else(|| "local".to_string());
+        // Removals re-check the same way but are not an update run, so they must
+        // never satisfy "close the window after updating".
+        let was_update = field("action").as_deref() != Some("remove");
         let h = handle.clone();
         tauri::async_runtime::spawn(async move {
-            handle_update_finished(h, scope).await;
+            handle_update_finished(h, scope, was_update).await;
         });
     });
 
@@ -738,7 +744,7 @@ impl Drop for FullCheckGuard<'_> {
 /// Re-check after a terminal-launched update closes. Only the affected target
 /// is re-scanned: a pending self-update restarts the service, "local" re-checks
 /// the local system, and a hostname re-checks just that one remote host.
-async fn handle_update_finished(app_handle: tauri::AppHandle, scope: String) {
+async fn handle_update_finished(app_handle: tauri::AppHandle, scope: String, was_update: bool) {
     if scope == "local" {
         // A self-update (yay-sys-tray-git was in the local list) needs a service
         // restart to load the new binary rather than a plain re-check.
@@ -769,7 +775,9 @@ async fn handle_update_finished(app_handle: tauri::AppHandle, scope: String) {
         return;
     }
 
-    maybe_close_after_update(&app_handle).await;
+    if was_update {
+        maybe_close_after_update(&app_handle).await;
+    }
 }
 
 /// True when the latest results leave nothing to act on: no pending updates
@@ -792,6 +800,11 @@ fn fleet_is_clean(local: Option<&CheckResult>, remote: &[HostResult]) -> bool {
 /// re-check, so simply opening the app on an up-to-date system never dismisses
 /// it. The frontend does the hiding: it knows whether the user is still looking
 /// at the Updates screen the update was started from.
+///
+/// Called after the re-check released `refresh_lock`, so it retakes the lock
+/// before reading: a re-check queued behind this one (another update terminal
+/// closing) must get to write its results first, or a host it is about to
+/// report as still pending would read as clean here.
 async fn maybe_close_after_update(app_handle: &tauri::AppHandle) {
     let enabled = {
         let state = app_handle.state::<AppState>();
@@ -803,6 +816,14 @@ async fn maybe_close_after_update(app_handle: &tauri::AppHandle) {
     }
 
     let tray_state = app_handle.state::<TrayState>();
+    let _refresh_guard = tray_state.refresh_lock.lock().await;
+    // A full scan takes the flag before it queues on the lock, so this also
+    // covers one that hasn't started yet: its results are the ones that matter,
+    // and it will emit its own state when it finishes.
+    if tray_state.full_check_in_progress.load(Ordering::Acquire) {
+        return;
+    }
+
     let local = tray_state.local_result.read().await.clone();
     let remote = tray_state.remote_results.read().await.clone();
     if !fleet_is_clean(local.as_ref(), &remote) {
