@@ -291,22 +291,31 @@ async fn remote_aur_updates(target: &str, timeout: u32) -> Result<Vec<UpdateInfo
     crate::aur::updates_for_installed(installed).await
 }
 
+/// Printed by the helper probe, and only by it. The answer rides on stdout
+/// rather than an exit status because the statuses are ambiguous: ssh reuses
+/// 255 for its own failures, a signalled process has no code at all, and a
+/// shell that couldn't run the builtin looks the same as one that ran it and
+/// found nothing. A marker that has to be printed can only come from a shell
+/// that actually asked.
+const NO_AUR_HELPER_MARKER: &str = "yst-no-aur-helper";
+
 /// Ask whether the host is missing the AUR helper its updates would need.
 ///
-/// The same `command -v yay` the update commands in `terminal.rs` branch on, so
-/// the answer shown in the window is the one the terminal will reach. Only asked
-/// when the host has AUR updates: for everyone else the answer changes nothing,
-/// and it saves the round-trip.
+/// Asks with the same `command -v yay` the update commands in `terminal.rs`
+/// branch on, so the answer shown in the window is the one the terminal will
+/// reach. Only asked when the host has AUR updates: for everyone else the
+/// answer changes nothing, and it saves the round-trip.
 ///
-/// Anything other than a clean "no such command" answers false. ssh reports its
-/// own failures as 255, and a host we couldn't ask is not a host we know lacks
-/// yay — mislabelling real work as "not applicable" would hide it.
+/// Silence means "don't know", which answers false. A host we couldn't ask is
+/// not a host we know lacks yay, and mislabelling real work as "not applicable"
+/// would hide it — the update path still says so if it turns out to be missing.
 async fn remote_aur_helper_missing(target: &str, timeout: u32, ask: bool) -> bool {
     if !ask {
         return false;
     }
-    match ssh_run(target, "command -v yay >/dev/null 2>&1", timeout).await {
-        Ok(out) => !out.status.success() && out.status.code() != Some(255),
+    let probe = format!("command -v yay >/dev/null 2>&1 || echo {NO_AUR_HELPER_MARKER}");
+    match ssh_run(target, &probe, timeout).await {
+        Ok(out) => String::from_utf8_lossy(&out.stdout).contains(NO_AUR_HELPER_MARKER),
         Err(_) => false,
     }
 }
