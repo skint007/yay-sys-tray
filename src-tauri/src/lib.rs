@@ -3,6 +3,8 @@ mod checker;
 mod commands;
 mod config;
 mod icons;
+#[cfg(target_os = "linux")]
+mod linux_renderer;
 mod system;
 mod tailscale;
 mod terminal;
@@ -18,6 +20,11 @@ pub struct AppState {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    #[cfg(target_os = "linux")]
+    let dmabuf_workaround_enabled = linux_renderer::configure();
+    #[cfg(not(target_os = "linux"))]
+    let dmabuf_workaround_enabled = false;
+
     let config = AppConfig::load();
 
     tauri::Builder::default()
@@ -27,7 +34,7 @@ pub fn run() {
             config: RwLock::new(config),
         })
         .manage(tray::TrayState::new())
-        .setup(|app| {
+        .setup(move |app| {
             tray::setup_tray(app)?;
 
             // Intercept window close to hide instead of quit
@@ -46,6 +53,12 @@ pub fn run() {
                     .level(log::LevelFilter::Info)
                     .build(),
             )?;
+
+            if dmabuf_workaround_enabled {
+                log::info!(
+                    "Disabled the WebKitGTK DMABUF renderer for NVIDIA Wayland compatibility"
+                );
+            }
 
             // Start periodic update checks
             tray::start_periodic_check(app.handle().clone());
