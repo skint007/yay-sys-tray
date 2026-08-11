@@ -19,6 +19,7 @@ const COMPOSITOR_DRM_DEVICE_VARS: [&str; 3] =
 pub fn configure() -> bool {
     let session_type = std::env::var("XDG_SESSION_TYPE").ok();
     let wayland_display = std::env::var("WAYLAND_DISPLAY").ok();
+    let wayland_socket = std::env::var("WAYLAND_SOCKET").ok();
     let x11_display = std::env::var("DISPLAY").ok();
     let gdk_backend = std::env::var("GDK_BACKEND").ok();
     let override_present = RENDERER_OVERRIDES
@@ -29,6 +30,7 @@ pub fn configure() -> bool {
         nvidia_renderer_present(),
         session_type.as_deref(),
         wayland_display.as_deref(),
+        wayland_socket.as_deref(),
         x11_display.as_deref(),
         gdk_backend.as_deref(),
         override_present,
@@ -46,22 +48,31 @@ fn should_disable_dmabuf(
     nvidia_renderer_present: bool,
     session_type: Option<&str>,
     wayland_display: Option<&str>,
+    wayland_socket: Option<&str>,
     x11_display: Option<&str>,
     gdk_backend: Option<&str>,
     override_present: bool,
 ) -> bool {
     nvidia_renderer_present
         && !override_present
-        && is_wayland_session(session_type, wayland_display, x11_display, gdk_backend)
+        && is_wayland_session(
+            session_type,
+            wayland_display,
+            wayland_socket,
+            x11_display,
+            gdk_backend,
+        )
 }
 
 fn is_wayland_session(
     session_type: Option<&str>,
     wayland_display: Option<&str>,
+    wayland_socket: Option<&str>,
     x11_display: Option<&str>,
     gdk_backend: Option<&str>,
 ) -> bool {
     let wayland_available = wayland_display.is_some_and(|value| !value.trim().is_empty())
+        || wayland_socket.is_some_and(|value| !value.trim().is_empty())
         || session_type.is_some_and(|value| value.eq_ignore_ascii_case("wayland"));
     let x11_available = x11_display.is_some_and(|value| !value.trim().is_empty())
         || session_type.is_some_and(|value| value.eq_ignore_ascii_case("x11"));
@@ -88,6 +99,7 @@ fn is_wayland_session(
 struct DrmDevice {
     card_name: String,
     nvidia_driver: bool,
+    boot_display: bool,
     boot_vga: bool,
 }
 
@@ -117,8 +129,16 @@ fn nvidia_renderer_present() -> bool {
 }
 
 fn egl_vendor_list_selects_nvidia(value: &str) -> bool {
-    value.split(':').any(|path| {
-        Path::new(path.trim()).file_name().is_some_and(|name| {
+    let mut vendor_files = value
+        .split(':')
+        .map(str::trim)
+        .filter(|path| !path.is_empty());
+    let Some(first) = vendor_files.next() else {
+        return false;
+    };
+
+    std::iter::once(first).chain(vendor_files).all(|path| {
+        Path::new(path).file_name().is_some_and(|name| {
             name.to_string_lossy()
                 .to_ascii_lowercase()
                 .contains("nvidia")
@@ -143,6 +163,8 @@ fn read_drm_device(card_path: &Path) -> Option<DrmDevice> {
         card_name: card_path.file_name()?.to_string_lossy().into_owned(),
         nvidia_driver: vendor.trim().eq_ignore_ascii_case("0x10de")
             && driver.as_deref().is_some_and(|name| name == "nvidia"),
+        boot_display: std::fs::read_to_string(card_path.join("boot_display"))
+            .is_ok_and(|value| value.trim() == "1"),
         boot_vga: std::fs::read_to_string(device_path.join("boot_vga"))
             .is_ok_and(|value| value.trim() == "1"),
     })
@@ -185,10 +207,18 @@ fn primary_renderer_is_nvidia(
         }
     }
 
-    devices
-        .iter()
-        .any(|device| device.boot_vga && device.nvidia_driver)
-        || (devices.len() == 1 && nvidia_device_present)
+    let boot_display_available = devices.iter().any(|device| device.boot_display);
+    let primary_device_is_nvidia = if boot_display_available {
+        devices
+            .iter()
+            .any(|device| device.boot_display && device.nvidia_driver)
+    } else {
+        devices
+            .iter()
+            .any(|device| device.boot_vga && device.nvidia_driver)
+    };
+
+    primary_device_is_nvidia || (devices.len() == 1 && nvidia_device_present)
 }
 
 #[cfg(test)]
@@ -202,7 +232,15 @@ mod tests {
         DrmDevice {
             card_name: card_name.to_string(),
             nvidia_driver,
+            boot_display: false,
             boot_vga,
+        }
+    }
+
+    fn boot_display_device(card_name: &str, nvidia_driver: bool, boot_vga: bool) -> DrmDevice {
+        DrmDevice {
+            boot_display: true,
+            ..device(card_name, nvidia_driver, boot_vga)
         }
     }
 
@@ -212,6 +250,7 @@ mod tests {
             true,
             Some("wayland"),
             Some("wayland-0"),
+            None,
             None,
             None,
             false,
@@ -226,7 +265,19 @@ mod tests {
             Some("wayland-0"),
             None,
             None,
+            None,
             false,
+        ));
+    }
+
+    #[test]
+    fn wayland_socket_is_enough_for_explicit_wayland_backend() {
+        assert!(is_wayland_session(
+            None,
+            None,
+            Some("7"),
+            None,
+            Some("wayland")
         ));
     }
 
@@ -236,6 +287,7 @@ mod tests {
             true,
             Some("x11"),
             Some("wayland-0"),
+            None,
             Some(":0"),
             Some("wayland,x11"),
             false,
@@ -248,6 +300,7 @@ mod tests {
             true,
             Some("wayland"),
             Some("wayland-0"),
+            None,
             Some(":0"),
             Some("x11"),
             false,
@@ -259,12 +312,14 @@ mod tests {
         assert!(!is_wayland_session(
             Some("wayland"),
             Some("wayland-0"),
+            None,
             Some(":0"),
             Some("x11,wayland"),
         ));
         assert!(is_wayland_session(
             Some("wayland"),
             Some("wayland-0"),
+            None,
             Some(":0"),
             Some("wayland,x11"),
         ));
@@ -275,11 +330,13 @@ mod tests {
         assert!(is_wayland_session(
             Some("wayland"),
             Some("wayland-0"),
+            None,
             Some(":0"),
             Some("*")
         ));
         assert!(!is_wayland_session(
             Some("x11"),
+            None,
             None,
             Some(":0"),
             Some("x11,*")
@@ -294,6 +351,7 @@ mod tests {
             Some("wayland-0"),
             None,
             None,
+            None,
             false,
         ));
     }
@@ -303,6 +361,7 @@ mod tests {
         assert!(!should_disable_dmabuf(
             true,
             Some("x11"),
+            None,
             None,
             Some(":0"),
             None,
@@ -316,6 +375,7 @@ mod tests {
             true,
             Some("wayland"),
             Some("wayland-0"),
+            None,
             None,
             None,
             true,
@@ -335,6 +395,26 @@ mod tests {
     fn primary_nvidia_device_is_the_renderer_on_multi_gpu_system() {
         assert!(primary_renderer_is_nvidia(
             &[device("card0", true, true), device("card1", false, false),],
+            None,
+            false,
+        ));
+    }
+
+    #[test]
+    fn boot_display_takes_precedence_over_boot_vga() {
+        assert!(primary_renderer_is_nvidia(
+            &[
+                boot_display_device("card0", true, false),
+                device("card1", false, true),
+            ],
+            None,
+            false,
+        ));
+        assert!(!primary_renderer_is_nvidia(
+            &[
+                device("card0", true, true),
+                boot_display_device("card1", false, false),
+            ],
             None,
             false,
         ));
@@ -414,6 +494,9 @@ mod tests {
         ));
         assert!(!egl_vendor_list_selects_nvidia(
             "/usr/share/glvnd/egl_vendor.d/50_mesa.json"
+        ));
+        assert!(!egl_vendor_list_selects_nvidia(
+            "/usr/share/glvnd/egl_vendor.d/10_nvidia.json:/usr/share/glvnd/egl_vendor.d/50_mesa.json"
         ));
     }
 
