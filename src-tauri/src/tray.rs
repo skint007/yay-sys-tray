@@ -31,6 +31,23 @@ pub struct TrayState {
     /// concurrent re-checks that mutate the (single-threaded, non-thread-safe)
     /// GTK tray from multiple worker threads at the same time and crash.
     refresh_lock: tokio::sync::Mutex<()>,
+    /// Whether the remote half of the last full scan can be trusted: discovery
+    /// queried the tailnet, and every host it discovered produced a result. A
+    /// failed discovery leaves `remote_results` empty, which is otherwise
+    /// indistinguishable from a fleet with no remote hosts.
+    remote_scan_ok: AtomicBool,
+    /// The remote-config generation that scan ran under. Recorded rather than
+    /// compared, so whether the results still describe the configured fleet is
+    /// decided when they are read — a scan can never mark itself valid against
+    /// a configuration that changed while it was running.
+    remote_scan_generation: AtomicU64,
+    /// Bumped whenever the remote configuration changes, retiring every scan
+    /// that started before it.
+    remote_config_generation: AtomicU64,
+    /// Whether the most recent local check succeeded. A failed one deliberately
+    /// leaves the previous `local_result` in place so the window still has
+    /// something to show, so the result alone can't say how current it is.
+    local_check_ok: AtomicBool,
     /// Rejects duplicate full scans before they can queue on `refresh_lock`.
     /// Targeted post-update refreshes still serialize through `refresh_lock`,
     /// but never count as a full scan for the tray click freshness window.
@@ -67,6 +84,10 @@ impl TrayState {
             #[cfg(target_os = "linux")]
             linux_tray: Mutex::new(None),
             refresh_lock: tokio::sync::Mutex::new(()),
+            remote_scan_ok: AtomicBool::new(true),
+            remote_scan_generation: AtomicU64::new(0),
+            remote_config_generation: AtomicU64::new(0),
+            local_check_ok: AtomicBool::new(true),
             full_check_in_progress: AtomicBool::new(false),
             window_open: Mutex::new(WindowOpenState::default()),
             anim_generation: AtomicU64::new(0),
@@ -189,13 +210,19 @@ pub fn setup_tray(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     // host, or "local") instead of rescanning the whole fleet every time.
     let handle = app.handle().clone();
     app.listen("update-finished", move |event| {
-        let scope = serde_json::from_str::<serde_json::Value>(event.payload())
-            .ok()
-            .and_then(|v| v.get("scope").and_then(|s| s.as_str()).map(String::from))
-            .unwrap_or_else(|| "local".to_string());
+        let payload = serde_json::from_str::<serde_json::Value>(event.payload()).ok();
+        let field = |name: &str| {
+            payload
+                .as_ref()
+                .and_then(|v| v.get(name).and_then(|s| s.as_str()).map(String::from))
+        };
+        let scope = field("scope").unwrap_or_else(|| "local".to_string());
+        // Removals re-check the same way but are not an update run, so they must
+        // never satisfy "close the window after updating".
+        let was_update = field("action").as_deref() != Some("remove");
         let h = handle.clone();
         tauri::async_runtime::spawn(async move {
-            handle_update_finished(h, scope).await;
+            handle_update_finished(h, scope, was_update).await;
         });
     });
 
@@ -464,8 +491,20 @@ fn open_window(app_handle: &tauri::AppHandle, view: &str) {
         }
     }
 
-    let _ = app_handle.emit("open-window", serde_json::json!({ "view": view }));
-    if let Some(window) = app_handle.get_webview_window("main") {
+    let window = app_handle.get_webview_window("main");
+    // Whether this opens the window rather than refocusing one that is already
+    // up: the frontend treats a fresh open as a new session and a refocus as
+    // the same one continuing. A state we can't read counts as fresh, which
+    // only ever costs an auto-close.
+    let already_open = window
+        .as_ref()
+        .and_then(|w| w.is_visible().ok())
+        .unwrap_or(false);
+    let _ = app_handle.emit(
+        "open-window",
+        serde_json::json!({ "view": view, "fresh": !already_open }),
+    );
+    if let Some(window) = window {
         let _ = window.show();
         let _ = window.set_focus();
     }
@@ -599,6 +638,7 @@ async fn run_full_check(app_handle: tauri::AppHandle, fresh_for_minutes: Option<
     *refresh_state.last_check_attempt.write().await = Some(chrono::Local::now());
 
     let (
+        scan_generation,
         animations_enabled,
         notify_mode,
         tailscale_enabled,
@@ -609,6 +649,14 @@ async fn run_full_check(app_handle: tauri::AppHandle, fresh_for_minutes: Option<
         let state = app_handle.state::<AppState>();
         let config = state.config.read().await;
         (
+            // Taken under the same lock as the settings this scan will run
+            // under: `save_config` invalidates while holding the write lock, so
+            // the generation and the settings can never come from opposite
+            // sides of a settings change. A scan recorded under a generation it
+            // didn't actually run under would have its results thrown away.
+            refresh_state
+                .remote_config_generation
+                .load(Ordering::Acquire),
             config.animations,
             config.notify.clone(),
             config.tailscale_enabled,
@@ -622,17 +670,25 @@ async fn run_full_check(app_handle: tauri::AppHandle, fresh_for_minutes: Option<
 
     // Discover the remote hosts up front so the Updates window can render the
     // full scan list (local first, then each tagged peer) and track progress.
-    let remote_hostnames = if tailscale_enabled && !tailscale_tags.is_empty() {
+    // `discovery_ok` is false only when the tailnet itself couldn't be queried —
+    // an unreachable tailnet must not read as "this fleet has no remote hosts".
+    let (remote_hostnames, discovery_ok) = if tailscale_enabled && !tailscale_tags.is_empty() {
         let tags: Vec<String> = tailscale_tags
             .split(',')
             .map(|t| t.trim().to_string())
             .filter(|t| !t.is_empty())
             .collect();
         log::info!("Discovering Tailscale peers with tags: {:?}", tags);
-        tailscale::discover_peers(&tags).await
+        match tailscale::discover_peers(&tags).await {
+            Some(hosts) => (hosts, true),
+            None => {
+                log::warn!("Tailscale peer discovery failed");
+                (Vec::new(), false)
+            }
+        }
     } else {
         log::info!("Tailscale disabled or no tags configured");
-        Vec::new()
+        (Vec::new(), true)
     };
 
     // Announce the full host set so the UI can show queued/checking/done states.
@@ -682,6 +738,18 @@ async fn run_full_check(app_handle: tauri::AppHandle, fresh_for_minutes: Option<
     // update_tray_error (Err) each bump the animation generation, which stops it.
     let tray_state = app_handle.state::<TrayState>();
 
+    // Record what this scan learned about the remote fleet whichever way the
+    // local check went: the two halves fail independently. A host whose task
+    // failed to join is missing from the results altogether, so a short list
+    // means part of the fleet went unchecked rather than came back clean.
+    let remote_fleet_seen = discovery_ok && remote_hosts.len() == expected_remote_count;
+    tray_state
+        .remote_scan_ok
+        .store(remote_fleet_seen, Ordering::Release);
+    tray_state
+        .remote_scan_generation
+        .store(scan_generation, Ordering::Release);
+
     match result {
         Ok(check_result) => {
             // Counts only what can actually be applied: a remote host with AUR
@@ -692,10 +760,14 @@ async fn run_full_check(app_handle: tauri::AppHandle, fresh_for_minutes: Option<
             let listed_count = check_result.updates.len() as u32
                 + remote_hosts.iter().map(|h| h.updates.len() as u32).sum::<u32>();
             let old_count = *tray_state.previous_count.read().await;
-            let all_remote_checks_succeeded = remote_hosts.len() == expected_remote_count
-                && remote_hosts.iter().all(|host| host.error.is_none());
+            // A tailnet that couldn't be queried yields no hosts *and* no
+            // expectation of any, so counting alone would call the scan a
+            // success and let the freshness window hand out its empty results.
+            let all_remote_checks_succeeded =
+                remote_fleet_seen && remote_hosts.iter().all(|host| host.error.is_none());
 
             *tray_state.local_result.write().await = Some(check_result.clone());
+            tray_state.local_check_ok.store(true, Ordering::Release);
             *tray_state.remote_results.write().await = remote_hosts.clone();
             // A failed AUR half deliberately still counts as fresh. The
             // periodic watchdog retries off `last_check_attempt`, so clearing
@@ -724,6 +796,7 @@ async fn run_full_check(app_handle: tauri::AppHandle, fresh_for_minutes: Option<
         }
         Err(err) => {
             log::error!("Update check failed: {err}");
+            tray_state.local_check_ok.store(false, Ordering::Release);
             // The remote scan already completed before the local check was
             // evaluated — keep its results so the Updates window can still show
             // remote hosts even though the local check errored.
@@ -749,7 +822,7 @@ impl Drop for FullCheckGuard<'_> {
 /// Re-check after a terminal-launched update closes. Only the affected target
 /// is re-scanned: a pending self-update restarts the service, "local" re-checks
 /// the local system, and a hostname re-checks just that one remote host.
-async fn handle_update_finished(app_handle: tauri::AppHandle, scope: String) {
+async fn handle_update_finished(app_handle: tauri::AppHandle, scope: String, was_update: bool) {
     if scope == "local" {
         // A self-update (yay-sys-tray-git was in the local list) needs a service
         // restart to load the new binary rather than a plain re-check.
@@ -773,14 +846,130 @@ async fn handle_update_finished(app_handle: tauri::AppHandle, scope: String) {
             let _ = crate::system::restart_service().await;
             return;
         }
-        recheck_local(app_handle).await;
-    } else {
-        recheck_remote(app_handle, scope).await;
+        if !recheck_local(app_handle.clone()).await {
+            return;
+        }
+    } else if !recheck_remote(app_handle.clone(), scope).await {
+        return;
+    }
+
+    if was_update {
+        maybe_close_after_update(&app_handle).await;
     }
 }
 
+/// Retire the stored remote results: they describe the fleet as it used to be
+/// configured, so nothing may treat them as a checked one until a fresh scan
+/// lands. This also disarms a scan already in flight under the old
+/// configuration, which would otherwise land as if it had checked the new one.
+pub fn invalidate_remote_scan(tray_state: &TrayState) {
+    tray_state
+        .remote_config_generation
+        .fetch_add(1, Ordering::AcqRel);
+}
+
+/// Whether the stored remote results still describe the configured fleet: the
+/// scan that produced them saw all of it, and the remote configuration hasn't
+/// changed since that scan started.
+fn remote_scan_is_current(scan_ok: bool, scan_generation: u64, config_generation: u64) -> bool {
+    scan_ok && scan_generation == config_generation
+}
+
+/// True when the latest results leave nothing to act on: every scan behind them
+/// succeeded (`scans_ok`), no updates are pending anywhere, no host errored and
+/// no AUR outage. Anything unknown deliberately counts as "not clean" — an empty
+/// update list that only means "we couldn't look" is not an up-to-date system,
+/// and the warning is worth reading.
+///
+/// `local_applies` is false where there is no local system to update (a
+/// non-Arch install monitoring remote hosts only), and the fleet is then the
+/// remote hosts alone.
+fn fleet_is_clean(
+    local: Option<&CheckResult>,
+    remote: &[HostResult],
+    scans_ok: bool,
+    local_applies: bool,
+) -> bool {
+    if !scans_ok {
+        return false;
+    }
+    if local_applies {
+        let Some(local) = local else { return false };
+        if !local.updates.is_empty() || local.aur_error.is_some() {
+            return false;
+        }
+    }
+    remote
+        .iter()
+        .all(|h| h.updates.is_empty() && h.error.is_none() && h.aur_error.is_none())
+}
+
+/// Ask the window to hide once an update run has left the system clean.
+///
+/// Opt-in via `close_after_update`, and only reachable from the post-update
+/// re-check, so simply opening the app on an up-to-date system never dismisses
+/// it. The frontend does the hiding: it knows whether the user is still looking
+/// at the Updates screen the update was started from.
+///
+/// Called after the re-check released `refresh_lock`, so it retakes the lock
+/// before reading: a re-check queued behind this one (another update terminal
+/// closing) must get to write its results first, or a host it is about to
+/// report as still pending would read as clean here.
+///
+/// The lock discipline deliberately stops at this function. `save_config` does
+/// not take `refresh_lock` — it is held for whole fleet scans, and blocking the
+/// Settings dialog on one would be a far worse trade than the remaining window
+/// here, where a settings save landing between these reads and the emit lets a
+/// close fire from the previous fleet's results. That emit can only hide the
+/// window when the Updates view is on screen, and saving those settings means
+/// being in the Settings view, so it costs nothing a user can see.
+async fn maybe_close_after_update(app_handle: &tauri::AppHandle) {
+    let enabled = {
+        let state = app_handle.state::<AppState>();
+        let config = state.config.read().await;
+        config.close_after_update
+    };
+    if !enabled {
+        return;
+    }
+
+    let tray_state = app_handle.state::<TrayState>();
+    let _refresh_guard = tray_state.refresh_lock.lock().await;
+    // A full scan takes the flag before it queues on the lock, so this also
+    // covers one that hasn't started yet: its results are the ones that matter.
+    // The close is dropped rather than deferred until that scan lands — a scan
+    // is usually a Check Now, and ending the refresh the user just asked for by
+    // dismissing the window would be worse than leaving it open.
+    if tray_state.full_check_in_progress.load(Ordering::Acquire) {
+        return;
+    }
+
+    let local = tray_state.local_result.read().await.clone();
+    let remote = tray_state.remote_results.read().await.clone();
+    // The local half only exists on Arch; elsewhere the app monitors remote
+    // hosts only and `checkupdates` can never run.
+    let local_applies = crate::system::is_arch_linux();
+    // A failed local check leaves the previous result in place, and a remote
+    // scan that missed part of the fleet (or predates the current settings)
+    // leaves results that say nothing about it; neither may pass as clean.
+    let remote_current = remote_scan_is_current(
+        tray_state.remote_scan_ok.load(Ordering::Acquire),
+        tray_state.remote_scan_generation.load(Ordering::Acquire),
+        tray_state.remote_config_generation.load(Ordering::Acquire),
+    );
+    let scans_ok =
+        remote_current && (!local_applies || tray_state.local_check_ok.load(Ordering::Acquire));
+    if !fleet_is_clean(local.as_ref(), &remote, scans_ok, local_applies) {
+        return;
+    }
+
+    log::info!("Nothing left to update, closing the window");
+    let _ = app_handle.emit("close-after-update", ());
+}
+
 /// Re-run the local check and refresh the tray, leaving remote results intact.
-async fn recheck_local(app_handle: tauri::AppHandle) {
+/// Returns whether the re-check succeeded.
+async fn recheck_local(app_handle: tauri::AppHandle) -> bool {
     log::info!("Re-checking local system after update");
     // Serialize with concurrent checks/re-checks (a burst of closing terminals).
     let refresh_state = app_handle.state::<TrayState>();
@@ -790,21 +979,26 @@ async fn recheck_local(app_handle: tauri::AppHandle) {
     match result {
         Ok(check_result) => {
             *tray_state.local_result.write().await = Some(check_result.clone());
+            tray_state.local_check_ok.store(true, Ordering::Release);
             let remote = tray_state.remote_results.read().await.clone();
             refresh_after_recheck(&app_handle, &check_result, &remote).await;
             let _ = app_handle.emit("check-complete", &check_result);
+            true
         }
         Err(err) => {
             log::error!("Local re-check failed: {err}");
+            tray_state.local_check_ok.store(false, Ordering::Release);
             *tray_state.last_full_check.write().await = None;
             let _ = app_handle.emit("check-error", &err);
             update_tray_error(&app_handle);
+            false
         }
     }
 }
 
 /// Re-check a single remote host and refresh, leaving local + other hosts intact.
-async fn recheck_remote(app_handle: tauri::AppHandle, hostname: String) {
+/// Returns whether the re-check succeeded.
+async fn recheck_remote(app_handle: tauri::AppHandle, hostname: String) -> bool {
     log::info!("Re-checking remote host {hostname} after update");
     // Serialize with concurrent checks/re-checks (a burst of closing terminals).
     let refresh_state = app_handle.state::<TrayState>();
@@ -845,6 +1039,8 @@ async fn recheck_remote(app_handle: tauri::AppHandle, hostname: String) {
         refresh_after_recheck(&app_handle, &local, &remote).await;
     }
     let _ = app_handle.emit("check-complete", serde_json::json!({}));
+
+    !recheck_failed
 }
 
 /// Recompute the tray icon/tooltip + menu from the given local & remote state.
@@ -1181,7 +1377,10 @@ fn start_bounce_animation(
 
 #[cfg(test)]
 mod tests {
-    use super::check_is_fresh;
+    use super::{
+        check_is_fresh, fleet_is_clean, remote_scan_is_current, CheckResult, HostResult,
+    };
+    use crate::checker::UpdateInfo;
     use chrono::{Duration, Local, TimeZone};
 
     #[cfg(target_os = "linux")]
@@ -1206,6 +1405,144 @@ mod tests {
     #[test]
     fn check_at_interval_boundary_is_stale() {
         assert!(!check_is_fresh(Some(now() - Duration::minutes(60)), now(), 60));
+    }
+
+    fn update(package: &str) -> UpdateInfo {
+        UpdateInfo {
+            package: package.to_string(),
+            old_version: "1.0-1".to_string(),
+            new_version: "1.1-1".to_string(),
+            description: String::new(),
+            repository: "extra".to_string(),
+            url: String::new(),
+        }
+    }
+
+    fn local(updates: Vec<UpdateInfo>) -> CheckResult {
+        CheckResult {
+            updates,
+            needs_restart: false,
+            restart_packages: Vec::new(),
+            reboot_info: None,
+            aur_error: None,
+        }
+    }
+
+    fn host(hostname: &str, updates: Vec<UpdateInfo>) -> HostResult {
+        HostResult {
+            hostname: hostname.to_string(),
+            updates,
+            needs_restart: false,
+            restart_packages: Vec::new(),
+            error: None,
+            aur_error: None,
+            aur_helper_missing: false,
+        }
+    }
+
+    #[test]
+    fn nothing_pending_anywhere_is_clean() {
+        assert!(fleet_is_clean(
+            Some(&local(vec![])),
+            &[host("arch-serv", vec![])],
+            true,
+            true,
+        ));
+    }
+
+    #[test]
+    fn pending_updates_are_not_clean() {
+        assert!(!fleet_is_clean(
+            Some(&local(vec![update("jq")])),
+            &[],
+            true,
+            true,
+        ));
+        assert!(!fleet_is_clean(
+            Some(&local(vec![])),
+            &[host("arch-serv", vec![update("jq")])],
+            true,
+            true,
+        ));
+    }
+
+    #[test]
+    fn a_check_that_never_ran_is_not_clean() {
+        assert!(!fleet_is_clean(None, &[], true, true));
+    }
+
+    #[test]
+    fn a_host_only_install_ignores_the_local_half() {
+        // Nothing to check locally off Arch, so the remote hosts are the fleet.
+        assert!(fleet_is_clean(None, &[host("arch-serv", vec![])], true, false));
+        assert!(!fleet_is_clean(
+            None,
+            &[host("arch-serv", vec![update("jq")])],
+            true,
+            false,
+        ));
+    }
+
+    #[test]
+    fn updates_no_helper_can_apply_still_count_as_listed_work() {
+        // The window still lists them, so it isn't showing the "up to date"
+        // screen and must not be dismissed out from under the user.
+        let mut blocked = host("arch-serv", vec![update("yay-bin")]);
+        blocked.aur_helper_missing = true;
+        assert!(!fleet_is_clean(Some(&local(vec![])), &[blocked], true, true));
+    }
+
+    #[test]
+    fn a_complete_scan_under_the_current_settings_is_current() {
+        assert!(remote_scan_is_current(true, 3, 3));
+    }
+
+    #[test]
+    fn a_scan_overtaken_by_a_settings_change_is_not_current() {
+        // It saw the fleet it was told about, which is no longer the configured
+        // one. Decided here rather than when the scan lands, so a settings save
+        // racing that landing can't be overwritten by it.
+        assert!(!remote_scan_is_current(true, 3, 4));
+    }
+
+    #[test]
+    fn a_scan_that_missed_a_host_is_not_current() {
+        // A host whose check never produced a result is unknown, not clean.
+        assert!(!remote_scan_is_current(false, 3, 3));
+    }
+
+    #[test]
+    fn an_unqueryable_tailnet_is_not_clean() {
+        // Discovery failed, so the empty remote list means "we never saw the
+        // fleet", not "the fleet is up to date".
+        assert!(!fleet_is_clean(Some(&local(vec![])), &[], false, true));
+    }
+
+    #[test]
+    fn errors_keep_the_window_open() {
+        // An empty update list that only means "we couldn't look" must not read
+        // as an up-to-date system.
+        let mut unreachable = host("arch-serv", vec![]);
+        unreachable.error = Some("ssh: connect timed out".to_string());
+        assert!(!fleet_is_clean(
+            Some(&local(vec![])),
+            &[unreachable],
+            true,
+            true,
+        ));
+
+        let mut aur_down = local(vec![]);
+        aur_down.aur_error = Some("AUR unreachable".to_string());
+        assert!(!fleet_is_clean(Some(&aur_down), &[], true, true));
+
+        let mut host_aur_down = host("arch-serv", vec![]);
+        host_aur_down.aur_error = Some("AUR unreachable".to_string());
+        assert!(!fleet_is_clean(
+            Some(&local(vec![])),
+            &[host_aur_down],
+            true,
+            true,
+        ));
     }
 
     #[cfg(target_os = "linux")]

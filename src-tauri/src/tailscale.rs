@@ -91,19 +91,34 @@ pub async fn discover_all_tags() -> Vec<String> {
 }
 
 /// Get online Tailscale peers whose tags contain ALL specified tags.
-pub async fn discover_peers(tags: &[String]) -> Vec<String> {
+///
+/// `None` means the tailnet could not be queried at all, which is not the same
+/// as an empty result: callers that act on "no remote hosts" would otherwise
+/// treat an unreachable tailnet as a fleet of zero machines.
+pub async fn discover_peers(tags: &[String]) -> Option<Vec<String>> {
     let output = match Command::new("tailscale")
         .args(["status", "--json"])
         .output()
         .await
     {
         Ok(o) if o.status.success() => o,
-        _ => return Vec::new(),
+        _ => return None,
     };
 
     let Ok(data) = serde_json::from_slice::<serde_json::Value>(&output.stdout) else {
-        return Vec::new();
+        return None;
     };
+
+    // A stopped or logged-out tailnet answers with perfectly valid JSON and no
+    // peers at all, which would otherwise read as "this fleet has no remote
+    // hosts". An absent field is left alone: it means an unfamiliar output
+    // shape, and refusing to discover anything on that basis would be worse.
+    if let Some(state) = data.get("BackendState").and_then(|s| s.as_str()) {
+        if state != "Running" {
+            log::warn!("Tailscale backend is {state}, skipping peer discovery");
+            return None;
+        }
+    }
 
     let required_tags: Vec<String> = tags.iter().map(|t| format!("tag:{t}")).collect();
     let mut hostnames = Vec::new();
@@ -139,7 +154,7 @@ pub async fn discover_peers(tags: &[String]) -> Vec<String> {
     }
 
     hostnames.sort();
-    hostnames
+    Some(hostnames)
 }
 
 /// Build the SSH target (`user@host` or `host`).

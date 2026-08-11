@@ -28,11 +28,16 @@
     onclose,
     onnavigate,
     onquit,
+    onupdatelaunched,
     previewChecking,
   }: {
     onclose: () => void;
     onnavigate?: (view: "settings" | "about") => void;
     onquit?: () => void;
+    // Reports that an update was launched from here. The parent owns that fact
+    // because this component is unmounted while the user is in Settings or
+    // About, which would otherwise forget it mid-update.
+    onupdatelaunched?: () => void;
     // Dev-only: seed the "checking" view for the preview harness (no IPC).
     previewChecking?: {
       hosts: { key: string; name: string }[];
@@ -521,6 +526,10 @@
   }
 
   function executePrimary(key: string, sel: string[], restart: boolean) {
+    // Reported here rather than from runPrimary: that one may only open the
+    // partial-update warning, and an update the user hasn't confirmed yet must
+    // not arm the auto-close.
+    onupdatelaunched?.();
     if (sel.length > 0) {
       const p =
         key === "local"
@@ -538,6 +547,7 @@
   }
 
   function runRemoteBulk() {
+    onupdatelaunched?.();
     // Each host reboots only if it actually needs a restart (backend decides).
     runUpdateSelected(checkedHosts, true).catch(() => {});
   }

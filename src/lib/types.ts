@@ -50,6 +50,7 @@ export interface AppConfig {
   noconfirm: boolean;
   hold_terminal: boolean;
   autostart: boolean;
+  close_after_update: boolean;
   animations: boolean;
   theme: string;
   passwordless_updates: boolean;

@@ -14,9 +14,26 @@ pub async fn get_config(state: State<'_, AppState>) -> Result<AppConfig, String>
 }
 
 #[tauri::command]
-pub async fn save_config(state: State<'_, AppState>, config: AppConfig) -> Result<(), String> {
+pub async fn save_config(
+    state: State<'_, AppState>,
+    tray_state: State<'_, TrayState>,
+    config: AppConfig,
+) -> Result<(), String> {
     config.save()?;
     let mut current = state.config.write().await;
+    // The stored remote results describe the fleet as it was configured when
+    // they were scanned. Once that configuration changes they no longer say
+    // anything about the current one, so they must not pass as a checked fleet
+    // until a fresh scan has run.
+    let remote_config_changed = config.tailscale_enabled != current.tailscale_enabled
+        || config.tailscale_tags != current.tailscale_tags
+        || config.tailscale_ssh_user != current.tailscale_ssh_user;
+    // Invalidated while the config write lock is held, so a scan reading the
+    // generation under the read lock always gets the generation belonging to
+    // the settings it is about to scan with.
+    if remote_config_changed {
+        tray::invalidate_remote_scan(&tray_state);
+    }
     *current = config;
     Ok(())
 }
