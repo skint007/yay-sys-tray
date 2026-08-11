@@ -241,10 +241,18 @@
   $effect(() => {
     const validKeys = new Set(hosts.map((h) => h.key));
 
-    // A warning whose host has gone (updated elsewhere, or offline on the
-    // re-check) describes an update that can no longer run — drop it rather
-    // than let it be confirmed.
-    if (pending && !validKeys.has(pending.key)) pending = null;
+    // A warning the re-check has overtaken — its host is gone, or no longer
+    // offers what the snapshot names — describes an update that can no longer
+    // run as confirmed. Drop it rather than let it be confirmed.
+    if (pending) {
+      const host = hosts.find((h) => h.key === pending!.key);
+      const offered = new Set(host?.updates.map((u) => u.package) ?? []);
+      const intact =
+        !!host &&
+        host.updates.length === pending.total &&
+        pending.packages.every((p) => offered.has(p));
+      if (!intact) pending = null;
+    }
 
     const prunedChecked = checkedHosts.filter((k) => validKeys.has(k));
     if (prunedChecked.length !== checkedHosts.length) {
@@ -277,9 +285,15 @@
       return;
     }
 
-    getConfig()
-      .then((cfg) => (warnPartialUpdates = cfg.warn_partial_updates !== false))
-      .catch((e) => console.error("Failed to load config:", e));
+    // Before the results, so the update controls are never live while the
+    // partial-update warning is still on its default — someone who turned it
+    // off would otherwise be warned anyway if they were quick enough.
+    try {
+      const cfg = await getConfig();
+      warnPartialUpdates = cfg.warn_partial_updates !== false;
+    } catch (e) {
+      console.error("Failed to load config:", e);
+    }
 
     await loadResults();
     // Register the scan-progress listeners. onMount's async return value is a
