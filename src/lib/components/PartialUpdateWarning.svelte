@@ -18,6 +18,23 @@
   } = $props();
 
   let dontWarnAgain = $state(false);
+  let modalEl: HTMLElement | null = null;
+
+  // Keep Tab inside the dialog. Without this, tabbing past the last button
+  // walks into the list behind the overlay, where Enter can remove a package
+  // or close the window while the warning is still up.
+  function trapTab(e: KeyboardEvent) {
+    if (e.key !== "Tab" || !modalEl) return;
+    const stops = [...modalEl.querySelectorAll<HTMLElement>("button, input")];
+    if (stops.length === 0) return;
+    const first = stops[0];
+    const last = stops[stops.length - 1];
+    const here = document.activeElement;
+    if (e.shiftKey ? here === first || here === modalEl : here === last) {
+      e.preventDefault();
+      (e.shiftKey ? last : first).focus();
+    }
+  }
 </script>
 
 <!-- svelte-ignore a11y_click_events_have_key_events -->
@@ -30,7 +47,9 @@
     role="alertdialog"
     aria-labelledby="pu-title"
     tabindex="-1"
+    bind:this={modalEl}
     onclick={(e) => e.stopPropagation()}
+    onkeydown={trapTab}
     {@attach (el: HTMLElement) => el.focus()}
   >
     <div class="head">
