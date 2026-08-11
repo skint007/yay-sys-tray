@@ -12,6 +12,7 @@ const RENDERER_OVERRIDES: [&str; 3] = [
 ];
 const COMPOSITOR_DRM_DEVICE_VARS: [&str; 3] =
     ["KWIN_DRM_DEVICES", "AQ_DRM_DEVICES", "WLR_DRM_DEVICES"];
+const WLR_RENDER_DRM_DEVICE: &str = "WLR_RENDER_DRM_DEVICE";
 
 /// Disable WebKitGTK's DMABUF renderer on NVIDIA Wayland sessions.
 ///
@@ -98,6 +99,24 @@ fn is_wayland_session(
     x11_display: Option<&str>,
     gdk_backend: Option<&str>,
 ) -> bool {
+    is_wayland_session_with_x11_probe(
+        session_type,
+        wayland_display,
+        wayland_socket,
+        x11_display,
+        gdk_backend,
+        x11_display_is_usable,
+    )
+}
+
+fn is_wayland_session_with_x11_probe(
+    session_type: Option<&str>,
+    wayland_display: Option<&str>,
+    wayland_socket: Option<&str>,
+    x11_display: Option<&str>,
+    gdk_backend: Option<&str>,
+    x11_probe: impl Fn(Option<&str>) -> bool,
+) -> bool {
     let wayland_available = wayland_display.is_some_and(|value| !value.trim().is_empty())
         || wayland_socket.is_some_and(|value| !value.trim().is_empty())
         || session_type.is_some_and(|value| value.eq_ignore_ascii_case("wayland"));
@@ -110,6 +129,9 @@ fn is_wayland_session(
                 return true;
             }
             if backend.eq_ignore_ascii_case("x11") && x11_available {
+                if x11_probe(x11_display) {
+                    return false;
+                }
                 continue;
             }
             if backend == "*" {
@@ -120,6 +142,36 @@ fn is_wayland_session(
     }
 
     wayland_available
+}
+
+fn x11_display_is_usable(display: Option<&str>) -> bool {
+    type XOpenDisplay = unsafe extern "C" fn(*const c_char) -> *mut c_void;
+    type XCloseDisplay = unsafe extern "C" fn(*mut c_void) -> c_int;
+
+    // SAFETY: The symbols use libX11's C ABI, the library outlives the copied
+    // function pointers, and a successfully-opened display is closed once.
+    unsafe {
+        let x11 = match libloading::Library::new("libX11.so.6") {
+            Ok(x11) => x11,
+            Err(_) => return false,
+        };
+        let Ok(x_open_display) = x11.get::<XOpenDisplay>(b"XOpenDisplay\0") else {
+            return false;
+        };
+        let Ok(x_close_display) = x11.get::<XCloseDisplay>(b"XCloseDisplay\0") else {
+            return false;
+        };
+        let display_name = display.and_then(|value| CString::new(value).ok());
+        let display_name_ptr = display_name
+            .as_ref()
+            .map_or(std::ptr::null(), |value| value.as_ptr());
+        let x_display = x_open_display(display_name_ptr);
+        if x_display.is_null() {
+            return false;
+        }
+        x_close_display(x_display);
+        true
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -147,7 +199,8 @@ fn nvidia_renderer_present(
             .is_ok_and(|value| value.eq_ignore_ascii_case("nvidia"))
         || std::env::var("__EGL_VENDOR_LIBRARY_FILENAMES")
             .is_ok_and(|value| egl_vendor_list_selects_nvidia(&value));
-    let compositor_card = selected_compositor_card(&devices);
+    let compositor_card =
+        selected_renderer_card(&devices).or_else(|| selected_compositor_card(&devices));
     let mixed_gpu_system = devices.iter().any(|device| device.nvidia_driver)
         && devices.iter().any(|device| !device.nvidia_driver);
     let active_egl_renderer = (mixed_gpu_system
@@ -296,6 +349,11 @@ fn selected_compositor_card(devices: &[DrmDevice]) -> Option<String> {
     })
 }
 
+fn selected_renderer_card(devices: &[DrmDevice]) -> Option<String> {
+    let value = std::env::var(WLR_RENDER_DRM_DEVICE).ok()?;
+    first_available_card_from_device_list(&value, devices)
+}
+
 #[cfg(test)]
 fn first_card_from_device_list(value: &str) -> Option<String> {
     card_names_from_device_list(value).into_iter().next()
@@ -330,13 +388,30 @@ fn card_names_from_device_list(value: &str) -> Vec<String> {
 }
 
 fn card_name_from_path(path: &str) -> Option<String> {
+    card_name_from_path_with_sysfs(path, Path::new("/sys/class/drm"))
+}
+
+fn card_name_from_path_with_sysfs(path: &str, sys_class_drm: &Path) -> Option<String> {
     if path.is_empty() {
         return None;
     }
     let path = Path::new(path);
     let resolved = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
-    let card = resolved.file_name()?.to_string_lossy();
-    is_drm_card(&card).then(|| card.into_owned())
+    let node = resolved.file_name()?.to_string_lossy();
+    if is_drm_card(&node) {
+        return Some(node.into_owned());
+    }
+    if !node.strip_prefix("renderD").is_some_and(|suffix| {
+        !suffix.is_empty() && suffix.bytes().all(|byte| byte.is_ascii_digit())
+    }) {
+        return None;
+    }
+
+    std::fs::read_dir(sys_class_drm.join(node.as_ref()).join("device/drm"))
+        .ok()?
+        .filter_map(Result::ok)
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .find(|name| is_drm_card(name))
 }
 
 fn primary_renderer_is_nvidia(
@@ -367,8 +442,9 @@ fn primary_renderer_is_nvidia(
 #[cfg(test)]
 mod tests {
     use super::{
-        default_wayland_socket_available, egl_vendor_list_selects_nvidia,
-        first_available_card_from_device_list, first_card_from_device_list, is_wayland_session,
+        card_name_from_path_with_sysfs, default_wayland_socket_available,
+        egl_vendor_list_selects_nvidia, first_available_card_from_device_list,
+        first_card_from_device_list, is_wayland_session, is_wayland_session_with_x11_probe,
         mixed_gpu_renderer_is_nvidia, primary_renderer_is_nvidia, should_disable_dmabuf, DrmDevice,
     };
 
@@ -458,25 +534,25 @@ mod tests {
 
     #[test]
     fn explicit_x11_gdk_backend_skips_wayland_workaround() {
-        assert!(!should_disable_dmabuf(
-            true,
+        assert!(!is_wayland_session_with_x11_probe(
             Some("wayland"),
             Some("wayland-0"),
             None,
             Some(":0"),
             Some("x11"),
-            false,
+            |_| true,
         ));
     }
 
     #[test]
     fn wayland_fallback_is_treated_as_available() {
-        assert!(is_wayland_session(
+        assert!(is_wayland_session_with_x11_probe(
             Some("wayland"),
             Some("wayland-0"),
             None,
             Some(":0"),
             Some("x11,wayland"),
+            |_| false,
         ));
         assert!(is_wayland_session(
             Some("wayland"),
@@ -484,6 +560,18 @@ mod tests {
             None,
             Some(":0"),
             Some("wayland,x11"),
+        ));
+    }
+
+    #[test]
+    fn first_usable_gdk_backend_takes_precedence() {
+        assert!(!is_wayland_session_with_x11_probe(
+            Some("wayland"),
+            Some("wayland-0"),
+            None,
+            Some(":0"),
+            Some("x11,wayland"),
+            |_| true,
         ));
     }
 
@@ -496,12 +584,13 @@ mod tests {
             Some(":0"),
             Some("*")
         ));
-        assert!(!is_wayland_session(
+        assert!(!is_wayland_session_with_x11_probe(
             Some("x11"),
             None,
             None,
             Some(":0"),
-            Some("x11,*")
+            Some("x11,*"),
+            |_| true,
         ));
     }
 
@@ -636,6 +725,30 @@ mod tests {
 
         assert_eq!(
             first_card_from_device_list(&persistent_path.to_string_lossy()).as_deref(),
+            Some("card1")
+        );
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn resolves_wlroots_render_node_to_its_drm_card() {
+        let root = std::env::temp_dir().join(format!(
+            "yay-sys-tray-render-node-test-{}",
+            std::process::id()
+        ));
+        let render_node = root.join("dev/dri/renderD128");
+        let drm_device = root.join("sys/class/drm/renderD128/device/drm/card1");
+        std::fs::create_dir_all(render_node.parent().unwrap()).unwrap();
+        std::fs::write(&render_node, []).unwrap();
+        std::fs::create_dir_all(&drm_device).unwrap();
+
+        assert_eq!(
+            card_name_from_path_with_sysfs(
+                &render_node.to_string_lossy(),
+                &root.join("sys/class/drm")
+            )
+            .as_deref(),
             Some("card1")
         );
 
