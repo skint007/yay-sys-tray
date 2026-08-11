@@ -30,6 +30,30 @@ pub struct HostResult {
     /// listed alongside; mirrors `CheckResult::aur_error` for the local check so
     /// an AUR problem never reads as "up to date".
     pub aur_error: Option<String>,
+    /// The host has AUR updates but no yay to apply them with. Set only when the
+    /// probe actually reached the host and the shell said the command is
+    /// missing — a probe that couldn't run leaves this false, since claiming
+    /// "not applicable" on a guess is worse than the update path saying so.
+    pub aur_helper_missing: bool,
+}
+
+impl HostResult {
+    /// Pending AUR updates this host cannot apply, because it has no AUR helper.
+    /// Still listed in the window; just not work the user can do from here.
+    pub fn blocked_aur_count(&self) -> usize {
+        if !self.aur_helper_missing {
+            return 0;
+        }
+        self.updates.iter().filter(|u| u.is_aur()).count()
+    }
+
+    /// Updates that can actually be applied on this host. This is the number the
+    /// tray badge and every count-of-work label use: an ARM box whose only
+    /// pending updates need an AUR helper it can't install is not work anyone
+    /// can act on, and counting it would keep the badge lit forever.
+    pub fn actionable_count(&self) -> usize {
+        self.updates.len() - self.blocked_aur_count()
+    }
 }
 
 /// Get all unique tag names (without 'tag:' prefix) from Tailscale peers.
@@ -282,6 +306,35 @@ async fn remote_aur_updates(target: &str, timeout: u32) -> Result<Vec<UpdateInfo
     crate::aur::updates_for_installed(installed).await
 }
 
+/// Printed by the helper probe, and only by it. The answer rides on stdout
+/// rather than an exit status because the statuses are ambiguous: ssh reuses
+/// 255 for its own failures, a signalled process has no code at all, and a
+/// shell that couldn't run the builtin looks the same as one that ran it and
+/// found nothing. A marker that has to be printed can only come from a shell
+/// that actually asked.
+const NO_AUR_HELPER_MARKER: &str = "yst-no-aur-helper";
+
+/// Ask whether the host is missing the AUR helper its updates would need.
+///
+/// Asks with the same `command -v yay` the update commands in `terminal.rs`
+/// branch on, so the answer shown in the window is the one the terminal will
+/// reach. Only asked when the host has AUR updates: for everyone else the
+/// answer changes nothing, and it saves the round-trip.
+///
+/// Silence means "don't know", which answers false. A host we couldn't ask is
+/// not a host we know lacks yay, and mislabelling real work as "not applicable"
+/// would hide it — the update path still says so if it turns out to be missing.
+async fn remote_aur_helper_missing(target: &str, timeout: u32, ask: bool) -> bool {
+    if !ask {
+        return false;
+    }
+    let probe = format!("command -v yay >/dev/null 2>&1 || echo {NO_AUR_HELPER_MARKER}");
+    match ssh_run(target, &probe, timeout).await {
+        Ok(out) => String::from_utf8_lossy(&out.stdout).contains(NO_AUR_HELPER_MARKER),
+        Err(_) => false,
+    }
+}
+
 /// SSH into a host and run checkupdates.
 async fn check_host(hostname: &str, timeout: u32, ssh_user: &str) -> HostResult {
     let target = ssh_target(hostname, ssh_user);
@@ -292,6 +345,7 @@ async fn check_host(hostname: &str, timeout: u32, ssh_user: &str) -> HostResult 
         restart_packages: Vec::new(),
         error,
         aur_error,
+        aur_helper_missing: false,
     };
 
     let output = match ssh_run(&target, "checkupdates", timeout).await {
@@ -350,14 +404,16 @@ async fn check_host(hostname: &str, timeout: u32, ssh_user: &str) -> HostResult 
 
     let running_pkg = remote_kernel_package(&target, &updates, timeout).await;
 
-    // Enrich with metadata that checkupdates omits. Run both remote queries
-    // together so descriptions do not add another SSH round-trip to the
-    // critical path. Descriptions cover AUR packages too — they are installed,
-    // so `pacman -Qi` resolves them.
+    // Enrich with metadata that checkupdates omits. Run the remote queries
+    // together so neither descriptions nor the helper probe adds another SSH
+    // round-trip to the critical path. Descriptions cover AUR packages too —
+    // they are installed, so `pacman -Qi` resolves them.
     let all_names: Vec<String> = updates.iter().map(|u| u.package.clone()).collect();
-    let (repos, descriptions) = tokio::join!(
+    let has_aur_updates = updates.iter().any(|u| u.is_aur());
+    let (repos, descriptions, aur_helper_missing) = tokio::join!(
         remote_repositories(&target, &repo_names, timeout),
         remote_descriptions(&target, &all_names, timeout),
+        remote_aur_helper_missing(&target, timeout, has_aur_updates),
     );
     for u in &mut updates {
         // AUR rows carry their own repository and URL already, and are absent
@@ -371,8 +427,12 @@ async fn check_host(hostname: &str, timeout: u32, ssh_user: &str) -> HostResult 
         }
     }
 
+    // An update that can't be applied can't be a reason to reboot: an AUR kernel
+    // on a host with no helper would otherwise offer "Update & Restart" and
+    // reboot the box for an upgrade that never ran.
     let restart_pkgs: Vec<String> = updates
         .iter()
+        .filter(|u| !(aur_helper_missing && u.is_aur()))
         .filter(|u| package_requires_restart(&u.package, running_pkg.as_deref()))
         .map(|u| u.package.clone())
         .collect();
@@ -384,6 +444,7 @@ async fn check_host(hostname: &str, timeout: u32, ssh_user: &str) -> HostResult 
         updates,
         error: None,
         aur_error,
+        aur_helper_missing,
     }
 }
 
@@ -411,8 +472,10 @@ pub async fn check_hosts(
             let _ = handle.emit(
                 "check-host-done",
                 serde_json::json!({
+                    // The actionable number, so the live scan readout adds up to
+                    // the total the tray badge lands on when the scan finishes.
                     "key": result.hostname,
-                    "count": result.updates.len(),
+                    "count": result.actionable_count(),
                     "needs_restart": result.needs_restart,
                     "error": result.error.is_some(),
                 }),
@@ -433,4 +496,56 @@ pub async fn check_hosts(
 
     results.sort_by(|a, b| a.hostname.cmp(&b.hostname));
     results
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn upd(package: &str, repository: &str) -> UpdateInfo {
+        UpdateInfo {
+            package: package.to_string(),
+            old_version: "1.0-1".to_string(),
+            new_version: "1.1-1".to_string(),
+            description: String::new(),
+            repository: repository.to_string(),
+            url: String::new(),
+        }
+    }
+
+    fn host(updates: Vec<UpdateInfo>, aur_helper_missing: bool) -> HostResult {
+        HostResult {
+            hostname: "alarm-box".to_string(),
+            updates,
+            needs_restart: false,
+            restart_packages: Vec::new(),
+            error: None,
+            aur_error: None,
+            aur_helper_missing,
+        }
+    }
+
+    #[test]
+    fn every_update_counts_when_the_host_has_a_helper() {
+        let h = host(vec![upd("linux", "core"), upd("oh-my-posh-bin", "aur")], false);
+        assert_eq!(h.blocked_aur_count(), 0);
+        assert_eq!(h.actionable_count(), 2);
+    }
+
+    #[test]
+    fn aur_updates_stop_counting_without_a_helper() {
+        // The repo half is still work the user can do from here; the AUR half is
+        // listed but must not keep the tray badge lit.
+        let h = host(vec![upd("linux", "core"), upd("oh-my-posh-bin", "aur")], true);
+        assert_eq!(h.blocked_aur_count(), 1);
+        assert_eq!(h.actionable_count(), 1);
+    }
+
+    #[test]
+    fn a_host_with_only_blocked_updates_has_nothing_actionable() {
+        let h = host(vec![upd("oh-my-posh-bin", "aur")], true);
+        assert_eq!(h.actionable_count(), 0);
+        // Still listed — the window has to be able to explain why.
+        assert_eq!(h.updates.len(), 1);
+    }
 }

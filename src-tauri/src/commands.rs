@@ -137,7 +137,7 @@ fn split_selection(
     for update in updates {
         if wanted.contains(&update.package) {
             selected.push(update.package.clone());
-            if update.repository != "aur" {
+            if !update.is_aur() {
                 repo_only.push(update.package.clone());
             }
         }

@@ -301,6 +301,11 @@ struct LinuxTray {
     icon: ksni::Icon,
     tooltip: String,
     update_count: u32,
+    /// Rows the window would show, which is not the same as pending work: a
+    /// remote host's AUR updates with no helper to apply them are listed but
+    /// never counted. The menu item opens on this, so the one window that can
+    /// explain them stays reachable.
+    listed_count: u32,
 }
 
 #[cfg(target_os = "linux")]
@@ -351,7 +356,7 @@ impl ksni::Tray for LinuxTray {
                 } else {
                     "Show Updates".to_string()
                 },
-                enabled: self.update_count > 0,
+                enabled: self.listed_count > 0,
                 activate: Box::new(|tray: &mut Self| open_window(&tray.app_handle, "updates")),
                 ..Default::default()
             }
@@ -399,6 +404,7 @@ fn setup_platform_tray(app: &tauri::App) -> Result<(), Box<dyn std::error::Error
         icon: image_to_ksni_icon(&initial_icon),
         tooltip: "No updates checked yet".to_string(),
         update_count: 0,
+        listed_count: 0,
     });
     let handle = service.handle();
 
@@ -724,7 +730,12 @@ async fn run_full_check(app_handle: tauri::AppHandle, fresh_for_minutes: Option<
 
     match result {
         Ok(check_result) => {
+            // Counts only what can actually be applied: a remote host with AUR
+            // updates and no helper to apply them with is listed in the window
+            // but is not pending work (#29).
             let total_count = check_result.updates.len() as u32
+                + remote_hosts.iter().map(|h| h.actionable_count() as u32).sum::<u32>();
+            let listed_count = check_result.updates.len() as u32
                 + remote_hosts.iter().map(|h| h.updates.len() as u32).sum::<u32>();
             let old_count = *tray_state.previous_count.read().await;
             let all_remote_checks_succeeded = remote_hosts.len() == expected_remote_count
@@ -746,7 +757,7 @@ async fn run_full_check(app_handle: tauri::AppHandle, fresh_for_minutes: Option<
             update_tray_state(&app_handle, &check_result, &remote_hosts, animations_enabled)
                 .await;
 
-            set_show_updates_label(&app_handle, total_count).await;
+            set_show_updates_label(&app_handle, total_count, listed_count).await;
 
             // Send notification if configured
             let should_notify = match notify_mode.as_str() {
@@ -999,19 +1010,30 @@ async fn refresh_after_recheck(
         config.animations
     };
     let total_count = local.updates.len() as u32
-        + remote.iter().map(|h| h.updates.len() as u32).sum::<u32>();
+        + remote.iter().map(|h| h.actionable_count() as u32).sum::<u32>();
+    let listed_count =
+        local.updates.len() as u32 + remote.iter().map(|h| h.updates.len() as u32).sum::<u32>();
 
     {
         let tray_state = app_handle.state::<TrayState>();
         *tray_state.previous_count.write().await = total_count;
     }
     update_tray_state(app_handle, local, remote, animations).await;
-    set_show_updates_label(app_handle, total_count).await;
+    set_show_updates_label(app_handle, total_count, listed_count).await;
 }
 
 /// Enable/disable the "Show Updates" menu item and surface the count in its
 /// label.
-async fn set_show_updates_label(app_handle: &tauri::AppHandle, total_count: u32) {
+///
+/// The count is the pending work; whether the item is enabled follows
+/// `listed_count`, everything the window would show. They differ when a remote
+/// host has AUR updates and no helper to apply them: nothing to do, but the
+/// window is the only place that says why, so it has to stay reachable.
+async fn set_show_updates_label(
+    app_handle: &tauri::AppHandle,
+    total_count: u32,
+    listed_count: u32,
+) {
     #[cfg(target_os = "linux")]
     {
         let tray_state = app_handle.state::<TrayState>();
@@ -1021,7 +1043,10 @@ async fn set_show_updates_label(app_handle: &tauri::AppHandle, total_count: u32)
             .unwrap_or_else(|e| e.into_inner())
             .clone();
         if let Some(handle) = handle {
-            handle.update(|tray| tray.update_count = total_count);
+            handle.update(|tray| {
+                tray.update_count = total_count;
+                tray.listed_count = listed_count;
+            });
         }
     }
     #[cfg(not(target_os = "linux"))]
@@ -1032,7 +1057,7 @@ async fn set_show_updates_label(app_handle: &tauri::AppHandle, total_count: u32)
             guard.clone()
         };
         if let Some(item) = item {
-            let _ = item.set_enabled(total_count > 0);
+            let _ = item.set_enabled(listed_count > 0);
             let _ = item.set_text(if total_count > 0 {
                 format!("Show Updates ({total_count})")
             } else {
@@ -1056,7 +1081,7 @@ async fn update_tray_state(
     let local_count = result.updates.len() as u32;
     let remote_update_count: u32 = remote_hosts
         .iter()
-        .map(|h| h.updates.len() as u32)
+        .map(|h| h.actionable_count() as u32)
         .sum();
     let total_count = local_count + remote_update_count;
     let remote_needs_restart = remote_hosts.iter().any(|h| h.needs_restart);
@@ -1095,15 +1120,26 @@ async fn update_tray_state(
             // about the others — and a bare "up to date" would be the same lie
             // the local check was rebuilt to stop telling.
             let aur_failed = host.aur_error.is_some();
-            let mut label = match (&host.error, host.updates.len()) {
+            // Listed in the window but not applicable from here, so they are
+            // named rather than counted — see HostResult::actionable_count.
+            let blocked = host.blocked_aur_count();
+            let actionable = host.actionable_count();
+            let mut label = match (&host.error, actionable) {
                 // Reached the host but its AUR half failed, so the repo half is
                 // all that "up to date" can honestly cover.
                 (None, 0) if aur_failed => format!("{}: repos up to date", host.hostname),
+                // "up to date" would bury exactly what the window is showing.
+                (None, 0) if blocked > 0 => {
+                    format!("{}: {blocked} AUR update(s) need an AUR helper", host.hostname)
+                }
                 (None, 0) => format!("{}: up to date", host.hostname),
                 (None, n) => {
                     let mut s = format!("{}: {n} update(s)", host.hostname);
                     if host.needs_restart {
                         s.push_str(" (restart)");
+                    }
+                    if blocked > 0 {
+                        s.push_str(&format!(" (+{blocked} need an AUR helper)"));
                     }
                     s
                 }
@@ -1154,6 +1190,11 @@ async fn update_tray_state(
         tray_state.stop_animation();
         // The all-clear icon would be a claim the check can't back when the AUR
         // half failed — the error icon sends the user to the tooltip instead.
+        // Remote AUR updates with no helper to apply them deliberately leave the
+        // icon alone: they are a permanent state of that host, not a fault, and
+        // for the same reason a flaky remote host doesn't redden it, a box that
+        // will never have yay must not hold the tray in a warning forever. The
+        // tooltip lines above and the window carry it.
         set_tray_icon(
             app_handle,
             if local_aur_failed {
@@ -1346,6 +1387,7 @@ mod tests {
             restart_packages: Vec::new(),
             error: None,
             aur_error: None,
+            aur_helper_missing: false,
         }
     }
 
@@ -1390,6 +1432,15 @@ mod tests {
             true,
             false,
         ));
+    }
+
+    #[test]
+    fn updates_no_helper_can_apply_still_count_as_listed_work() {
+        // The window still lists them, so it isn't showing the "up to date"
+        // screen and must not be dismissed out from under the user.
+        let mut blocked = host("arch-serv", vec![update("yay-bin")]);
+        blocked.aur_helper_missing = true;
+        assert!(!fleet_is_clean(Some(&local(vec![])), &[blocked], true, true));
     }
 
     #[test]

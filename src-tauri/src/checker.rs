@@ -86,6 +86,15 @@ pub struct UpdateInfo {
     pub url: String,
 }
 
+impl UpdateInfo {
+    /// Whether this update comes from the AUR rather than a sync repository.
+    /// Plain pacman can neither install nor upgrade these, so every caller that
+    /// builds a pacman-only command line has to ask.
+    pub fn is_aur(&self) -> bool {
+        self.repository == crate::aur::AUR_REPO
+    }
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct RebootInfo {
     pub needed: bool,

@@ -1,4 +1,5 @@
 use crate::tailscale::ssh_target;
+use crate::tray::TrayState;
 use crate::AppState;
 use tauri::{Emitter, Manager};
 use tokio::process::Command;
@@ -135,15 +136,27 @@ fn with_reboot(base: String, reboot: Option<(&str, u32)>) -> String {
 /// Full-system update for a remote host.
 ///
 /// yay covers repo and AUR packages in one pass, so it is preferred wherever
-/// the host has it. Plain `pacman -Syu` skips foreign packages entirely, which
-/// would leave the AUR updates this app now reports permanently unactionable.
-/// The check runs on the host, so no extra probe round-trip is needed.
-fn remote_full_update_cmd(noconfirm: bool) -> String {
+/// the host has it. Plain `pacman -Syu` skips foreign packages entirely, so on
+/// a host without yay the AUR updates this app reports cannot be applied at
+/// all. `aur_pending` is how many of them the last check found: when the
+/// fallback runs with any of those outstanding it says so first, because
+/// pacman's own "there is nothing to do" reads as "already up to date" (#29).
+/// The yay check runs on the host, so no extra probe round-trip is needed.
+fn remote_full_update_cmd(noconfirm: bool, aur_pending: usize) -> String {
     let flag = if noconfirm { " --noconfirm" } else { "" };
-    format!(
-        "if command -v yay >/dev/null 2>&1; then yay -Syu{flag}; \
-         else sudo pacman -Syu{flag}; fi"
-    )
+    let pacman = format!("sudo pacman -Syu{flag}");
+    let without_yay = if aur_pending > 0 {
+        // Repo packages still update — the warning qualifies the run rather
+        // than replacing it, matching how remote_install_cmd handles a mixed
+        // selection.
+        format!(
+            "echo 'yay is not installed on this host, so its {aur_pending} AUR update(s) \
+             cannot be applied from here; updating repo packages only' >&2; {pacman}"
+        )
+    } else {
+        pacman
+    };
+    format!("if command -v yay >/dev/null 2>&1; then yay -Syu{flag}; else {without_yay}; fi")
 }
 
 /// Install a chosen set of packages on a remote host.
@@ -273,14 +286,28 @@ pub async fn run_local_update_packages(
     spawn_with(app_handle, prefix, yay_cmd, "local".to_string(), FinishedAction::Update).await;
 }
 
+/// How many of a host's pending updates came from the AUR at its last check.
+/// Read from the stored results rather than probed, so the warning the fallback
+/// prints names the same updates the window is showing.
+async fn pending_aur_count(app_handle: &tauri::AppHandle, hostname: &str) -> usize {
+    let tray_state = app_handle.state::<TrayState>();
+    let hosts = tray_state.remote_results.read().await;
+    hosts
+        .iter()
+        .find(|h| h.hostname == hostname)
+        .map(|h| h.updates.iter().filter(|u| u.is_aur()).count())
+        .unwrap_or(0)
+}
+
 /// Launch a remote full system update via SSH in a terminal.
 pub async fn run_remote_update(app_handle: tauri::AppHandle, hostname: &str, restart: bool) {
     let cfg = term_cfg(&app_handle).await;
+    let aur_pending = pending_aur_count(&app_handle, hostname).await;
     let target = ssh_target(hostname, &cfg.ssh_user);
     let prefix = terminal_prefix(&cfg.terminal, Some(&format!("Updating: {hostname}")), cfg.hold);
 
     let cmd = with_reboot(
-        remote_full_update_cmd(cfg.noconfirm),
+        remote_full_update_cmd(cfg.noconfirm, aur_pending),
         reboot_chain(restart, "sudo reboot", cfg.delay),
     );
 
@@ -392,14 +419,41 @@ mod tests {
 
     #[test]
     fn full_update_prefers_yay_and_falls_back_to_pacman() {
-        let cmd = remote_full_update_cmd(false);
+        let cmd = remote_full_update_cmd(false, 0);
         assert!(cmd.contains("command -v yay"));
         assert!(cmd.contains("yay -Syu"));
         // pacman -Syu alone would never update the AUR packages this app now
         // reports for remote hosts, so yay must be the preferred branch.
         assert!(cmd.contains("sudo pacman -Syu"));
         assert!(!cmd.contains("--noconfirm"));
-        assert_eq!(remote_full_update_cmd(true).matches("--noconfirm").count(), 2);
+        assert_eq!(remote_full_update_cmd(true, 0).matches("--noconfirm").count(), 2);
+    }
+
+    #[test]
+    fn full_update_without_aur_updates_stays_quiet() {
+        // Nothing is being skipped, so a warning would be noise on every host
+        // that simply has no AUR packages installed.
+        let cmd = remote_full_update_cmd(false, 0);
+        assert!(!cmd.contains("echo"));
+    }
+
+    #[test]
+    fn helperless_full_update_names_the_aur_updates_it_cannot_apply() {
+        // Without this, pacman prints "there is nothing to do" and the host
+        // reads as up to date while its AUR updates sit there (#29).
+        let cmd = remote_full_update_cmd(false, 3);
+        let (with_yay, fallback) = cmd.split_once("else").expect("fallback branch");
+        assert!(!with_yay.contains("echo"));
+        assert!(fallback.contains("3 AUR update(s)"));
+        assert!(fallback.contains(">&2"));
+        // The repo half is still applied — the warning qualifies the run.
+        assert!(fallback.contains("sudo pacman -Syu"));
+    }
+
+    #[test]
+    fn helperless_warning_still_carries_noconfirm_once_per_branch() {
+        let cmd = remote_full_update_cmd(true, 1);
+        assert_eq!(cmd.matches("--noconfirm").count(), 2);
     }
 
     #[test]
@@ -464,7 +518,7 @@ mod tests {
     fn reboot_chain_lands_after_the_conditional() {
         // The command ends in `fi`, so the chain has to be appended rather than
         // folded in the way build_shell_cmd does it.
-        let base = remote_full_update_cmd(false);
+        let base = remote_full_update_cmd(false, 0);
         let chained = with_reboot(base, Some(("sudo reboot", 30)));
         assert!(chained.contains("fi &&"));
         assert!(chained.trim_end().ends_with("sudo reboot"));
