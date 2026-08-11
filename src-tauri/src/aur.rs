@@ -26,6 +26,12 @@ use tokio::process::Command;
 
 const RPC_URL: &str = "https://aur.archlinux.org/rpc/v5/info";
 
+/// The `repository` value carried by every AUR update. Named here because
+/// several call sites have to tell AUR rows apart from sync-repo ones — the
+/// pacman fallback must never be handed one, and a host without an AUR helper
+/// can't apply them at all.
+pub const AUR_REPO: &str = "aur";
+
 /// The AUR caps how many packages a single RPC request may name. Chunking well
 /// under that cap also keeps any one request small enough to retry cheaply.
 const BATCH_SIZE: usize = 200;
@@ -244,7 +250,7 @@ pub async fn updates_for_installed(
             old_version: current,
             new_version: available.clone(),
             description: String::new(),
-            repository: "aur".to_string(),
+            repository: AUR_REPO.to_string(),
         });
     }
 

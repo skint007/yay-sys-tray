@@ -12,7 +12,7 @@
     runRemoteUpdatePackages,
     runUpdateSelected,
   } from "../ipc";
-  import { repoRank, repoColorVar, UNKNOWN_REPO } from "../repo";
+  import { repoRank, repoColorVar, AUR_REPO, UNKNOWN_REPO } from "../repo";
   import UpdateCard from "./UpdateCard.svelte";
   import Reticle from "./Reticle.svelte";
   import DependencyTree from "./DependencyTree.svelte";
@@ -46,6 +46,9 @@
     needsRestart: boolean;
     restartPkgs: string[];
     checkable: boolean;
+    /** Updates listed for this host that nothing here can apply — AUR packages
+     * on a host with no AUR helper. Kept out of every count of pending work. */
+    blockedPkgs: Set<string>;
   };
 
   let localResult = $state<CheckResult | null>(null);
@@ -79,6 +82,9 @@
         needsRestart: localResult?.needs_restart ?? false,
         restartPkgs: localResult?.restart_packages ?? [],
         checkable: false,
+        // This machine runs its updates through yay, so nothing local is ever
+        // blocked for want of a helper.
+        blockedPkgs: new Set(),
       });
     }
     for (const h of remoteHosts) {
@@ -90,11 +96,33 @@
           needsRestart: h.needs_restart,
           restartPkgs: h.restart_packages,
           checkable: true,
+          blockedPkgs: new Set(
+            h.aur_helper_missing
+              ? h.updates.filter((u) => u.repository === AUR_REPO).map((u) => u.package)
+              : [],
+          ),
         });
       }
     }
     return list;
   });
+
+  /** Updates on a host that this app can actually apply. */
+  function actionable(h: Host): number {
+    return h.updates.length - h.blockedPkgs.size;
+  }
+
+  // Every host that has AUR updates it can't apply. Named fleet-wide like the
+  // AUR-failure banner, so the reason is visible before the user clicks Update
+  // and finds pacman reporting "there is nothing to do".
+  let helperMissing = $derived.by(() => {
+    const out: { name: string; count: number }[] = [];
+    for (const h of hosts) {
+      if (h.blockedPkgs.size > 0) out.push({ name: h.name, count: h.blockedPkgs.size });
+    }
+    return out;
+  });
+  let blockedTotal = $derived(helperMissing.reduce((s, h) => s + h.count, 0));
 
   // Every host whose AUR half failed, local or remote. Collected fleet-wide
   // rather than per selected host: a host with an AUR error and no repo updates
@@ -120,7 +148,12 @@
     return { count: aurFailures.length, names, error: aurFailures[0].error, shared };
   });
 
-  let totalCount = $derived(hosts.reduce((s, h) => s + h.updates.length, 0));
+  // The header pill counts pending work, so blocked updates are excluded — they
+  // are reported separately rather than inflating a number the user can't act
+  // on. listedCount keeps the "up to date" screen honest: a host whose only
+  // updates are blocked still has something to show.
+  let totalCount = $derived(hosts.reduce((s, h) => s + actionable(h), 0));
+  let listedCount = $derived(hosts.reduce((s, h) => s + h.updates.length, 0));
   let multiHost = $derived(hosts.length > 1);
   // Any remote host was scanned this run — the Tailscale feature is in play, so
   // the active device stays worth naming even after the sidebar collapses.
@@ -140,14 +173,28 @@
 
   let grouped = $derived.by(() => {
     const h = activeHost;
-    if (!h) return { restart: [] as UpdateInfo[], repos: [] as RepoGroup[], visible: [] as UpdateInfo[] };
+    if (!h)
+      return {
+        restart: [] as UpdateInfo[],
+        repos: [] as RepoGroup[],
+        blocked: [] as UpdateInfo[],
+        visible: [] as UpdateInfo[],
+      };
     const q = search.toLowerCase();
     const ups = h.updates.filter((u) => !q || u.package.toLowerCase().includes(q));
     const rset = new Set(h.restartPkgs);
     const byName = (a: UpdateInfo, b: UpdateInfo) => a.package.localeCompare(b.package);
     const restart: UpdateInfo[] = [];
+    const blocked: UpdateInfo[] = [];
     const byRepo = new Map<string, UpdateInfo[]>();
     for (const u of ups) {
+      // Checked before the restart split: an AUR kernel on a helperless host is
+      // still not something this app can apply, so it must not land in a group
+      // whose packages can be selected.
+      if (h.blockedPkgs.has(u.package)) {
+        blocked.push(u);
+        continue;
+      }
       if (rset.has(u.package)) {
         restart.push(u);
         continue;
@@ -158,10 +205,13 @@
       else byRepo.set(repo, [u]);
     }
     restart.sort(byName);
+    blocked.sort(byName);
     const repos = [...byRepo.entries()]
       .map(([name, updates]) => ({ name, updates: updates.sort(byName) }))
       .sort((a, b) => repoRank(a.name) - repoRank(b.name) || a.name.localeCompare(b.name));
-    return { restart, repos, visible: [...restart, ...repos.flatMap((r) => r.updates)] };
+    // `visible` drives select-all and the selection count, so blocked rows stay
+    // out of it — selecting one would build an update that does nothing.
+    return { restart, repos, blocked, visible: [...restart, ...repos.flatMap((r) => r.updates)] };
   });
 
   let visiblePkgs = $derived(grouped.visible.map((u) => u.package));
@@ -172,9 +222,18 @@
     if (!activeHost) return "Update";
     const base = selCount > 0 ? "Update Selected" : "Update All";
     const suffix = activeHost.needsRestart ? " & Restart" : "";
-    const count = selCount > 0 ? selCount : activeHost.updates.length;
+    const count = selCount > 0 ? selCount : actionable(activeHost);
     return `${base}${suffix} (${count})`;
   });
+  // Nothing left to apply on this host — every update it has needs an AUR
+  // helper it doesn't have. Running the update anyway is what made pacman
+  // report "there is nothing to do" (#29).
+  let primaryDisabled = $derived(!!activeHost && selCount === 0 && actionable(activeHost) === 0);
+  let blockedReason = $derived(
+    activeHost
+      ? `yay is not installed on ${activeHost.name}, so this AUR update cannot be applied from here`
+      : "",
+  );
 
   // Checking-view aggregates.
   let scanDone = $derived(
@@ -233,8 +292,11 @@
         delete selectedByHost[key];
         continue;
       }
-      // Also drop any selected packages the host no longer offers.
-      const offered = new Set(host.updates.map((u) => u.package));
+      // Also drop any selected packages the host no longer offers — including
+      // ones a re-check has since found to be unapplicable there.
+      const offered = new Set(
+        host.updates.filter((u) => !host.blockedPkgs.has(u.package)).map((u) => u.package),
+      );
       const cur = selectedByHost[key];
       const pruned = cur.filter((p) => offered.has(p));
       if (pruned.length !== cur.length) selectedByHost[key] = pruned;
@@ -375,6 +437,11 @@
       <span class="checking-pill">CHECKING…</span>
     {:else}
       <span class="count-pill">{totalCount}</span>
+      {#if blockedTotal > 0}
+        <span class="blocked-pill" title="Listed below, but no AUR helper on the host to apply them">
+          {blockedTotal} BLOCKED
+        </span>
+      {/if}
       {#if !multiHost && remoteInPlay && activeHost}
         <span class="active-host" class:reboot={activeHost.needsRestart}>
           <span class="dot"></span>{activeHost.name}
@@ -414,6 +481,25 @@
         {:else}
           AUR check failed on {aurSummary.count} hosts ({aurSummary.names}) — AUR updates not
           shown. First: {aurSummary.error}
+        {/if}
+      </span>
+    </div>
+  {/if}
+
+  <!-- Says it before the user clicks Update, which is the whole point: the
+       update itself can only report it afterwards, by which time the terminal
+       has closed. -->
+  {#if !checking && !loading && helperMissing.length > 0}
+    <div class="aur-error" role="status">
+      <span class="aur-error-dot"></span>
+      <span class="aur-error-text">
+        {#if helperMissing.length === 1}
+          {helperMissing[0].name} has {helperMissing[0].count} AUR update(s) that can't be applied
+          from here — yay is not installed on it, and pacman can't upgrade AUR packages.
+        {:else}
+          {helperMissing.length} hosts ({helperMissing.map((h) => h.name).join(", ")}) have
+          {blockedTotal} AUR update(s) that can't be applied from here — yay is not installed on
+          them, and pacman can't upgrade AUR packages.
         {/if}
       </span>
     </div>
@@ -465,7 +551,7 @@
     </footer>
   {:else if loading}
     <div class="centered"><span class="spinner"></span></div>
-  {:else if totalCount === 0}
+  {:else if listedCount === 0}
     <div class="centered muted">System is up to date</div>
   {:else}
     <div class="body">
@@ -505,7 +591,15 @@
               {/if}
               <span class="dot"></span>
               <span class="host-name">{h.name}</span>
-              <span class="host-count">{h.updates.length}</span>
+              {#if h.blockedPkgs.size > 0}
+                <span
+                  class="host-blocked"
+                  title={`${h.blockedPkgs.size} AUR update(s) need an AUR helper this host doesn't have`}
+                >
+                  +{h.blockedPkgs.size}
+                </span>
+              {/if}
+              <span class="host-count">{actionable(h)}</span>
             </button>
           {/each}
         </aside>
@@ -542,6 +636,22 @@
             />
           {/each}
         {/each}
+        {#if grouped.blocked.length > 0}
+          <div class="section blocked-section">
+            <span class="sdot"></span>NOT APPLICABLE — NO AUR HELPER
+            <span class="scount">{grouped.blocked.length}</span>
+          </div>
+          {#each grouped.blocked as u (u.package)}
+            <UpdateCard
+              update={u}
+              blocked
+              {blockedReason}
+              compact={density === "compact"}
+              onremove={handleRemove}
+              onShowDeps={(reverse) => (showDeps = { pkg: u.package, reverse, repo: u.repository, host: activeKey === "local" ? null : activeKey })}
+            />
+          {/each}
+        {/if}
       </main>
     </div>
 
@@ -559,10 +669,15 @@
           <button class="btn cyan" onclick={runRemoteBulk}>Update All Remote ({checkedHosts.length})</button>
         {/if}
         {#if activeHost?.needsRestart}
-          <button class="btn ghost" onclick={() => runPrimary(false)}>Update</button>
+          <button class="btn ghost" onclick={() => runPrimary(false)} disabled={primaryDisabled}>Update</button>
         {/if}
         <div class="split" class:split-caret={activeHost?.needsRestart}>
-          <button class="btn primary main" onclick={() => runPrimary(activeHost?.needsRestart ?? false)}>{primaryLabel}</button>
+          <button
+            class="btn primary main"
+            disabled={primaryDisabled}
+            title={primaryDisabled ? "Nothing here can be applied from this machine" : undefined}
+            onclick={() => runPrimary(activeHost?.needsRestart ?? false)}
+          >{primaryLabel}</button>
           {#if activeHost?.needsRestart}
             <button class="btn primary caret" onclick={() => (primaryMenu = !primaryMenu)} aria-label="More update options">
               <svg viewBox="0 0 24 24"><path d="M6 9l6 6 6-6" /></svg>
@@ -629,6 +744,20 @@
     border-radius: 9px;
     padding: 1px 9px;
   }
+  /* Sits next to the count pill so the header never implies the listed rows and
+     the pending-work number are the same set. */
+  .blocked-pill {
+    font-family: var(--font-mono);
+    font-weight: 600;
+    font-size: 10px;
+    letter-spacing: 0.5px;
+    color: var(--ys-text-muted);
+    background: color-mix(in srgb, var(--ys-pending) 14%, transparent);
+    border: 1px solid color-mix(in srgb, var(--ys-pending) 40%, transparent);
+    border-radius: 9px;
+    padding: 1px 8px;
+  }
+
   /* Names the active device in the header once the sidebar collapses to a
      single host — otherwise the last remote device is left unlabeled (#12). */
   .active-host {
@@ -710,6 +839,13 @@
     color: var(--ys-text-dim); background: var(--ys-surface);
     border-radius: 8px; padding: 0 7px; min-width: 22px; text-align: center;
   }
+  .host-blocked {
+    font-family: var(--font-mono); font-weight: 600; font-size: 10px;
+    color: var(--ys-text-muted);
+    background: color-mix(in srgb, var(--ys-pending) 14%, transparent);
+    border: 1px solid color-mix(in srgb, var(--ys-pending) 40%, transparent);
+    border-radius: 7px; padding: 0 5px; flex: none;
+  }
   .host.active .host-count { color: var(--ys-violet-text); background: color-mix(in srgb, var(--ys-violet-600) 22%, transparent); }
   .host.reboot .host-count { color: var(--ys-danger); background: color-mix(in srgb, var(--ys-danger) 18%, transparent); }
 
@@ -724,6 +860,8 @@
   .sdot { width: 6px; height: 6px; border-radius: 50%; }
   .section.restart { color: var(--ys-danger); }
   .section.restart .sdot { background: var(--ys-danger); }
+  .section.blocked-section { color: var(--ys-text-muted); }
+  .section.blocked-section .sdot { background: var(--ys-pending); }
   .section.repo .sdot { background: var(--c, var(--ys-pending)); }
   .scount {
     font-family: var(--font-mono); font-weight: 600; font-size: 10px;
@@ -751,6 +889,9 @@
   .btn.cyan:hover { background: color-mix(in srgb, var(--ys-cyan) 22%, transparent); }
   .btn.primary { background: linear-gradient(var(--ys-violet-500), var(--ys-violet-600)); color: #fff; border: none; }
   .btn.primary:hover { background: linear-gradient(var(--ys-violet-400), var(--ys-violet-500)); }
+  .btn:disabled { opacity: 0.45; cursor: not-allowed; }
+  .btn.primary:disabled:hover { background: linear-gradient(var(--ys-violet-500), var(--ys-violet-600)); }
+  .btn.ghost:disabled:hover { border-color: var(--ys-line); color: var(--ys-text-muted); }
 
   .split { position: relative; display: flex; box-shadow: var(--ys-glow); border-radius: 19px; }
   /* Only flatten the main button's right corners when the caret segment is shown. */
