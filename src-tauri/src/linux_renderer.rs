@@ -1,6 +1,7 @@
 //! Linux WebKitGTK renderer compatibility workarounds.
 
 use std::ffi::OsStr;
+use std::os::unix::fs::FileTypeExt;
 use std::path::Path;
 
 const RENDERER_OVERRIDES: [&str; 3] = [
@@ -52,7 +53,8 @@ fn default_wayland_socket_available(runtime_dir: Option<&OsStr>) -> bool {
     let Some(runtime_dir) = runtime_dir else {
         return false;
     };
-    Path::new(runtime_dir).join("wayland-0").exists()
+    std::fs::metadata(Path::new(runtime_dir).join("wayland-0"))
+        .is_ok_and(|metadata| metadata.file_type().is_socket())
 }
 
 fn should_disable_dmabuf(
@@ -148,12 +150,27 @@ fn egl_vendor_list_selects_nvidia(value: &str) -> bool {
         return false;
     };
 
-    std::iter::once(first).chain(vendor_files).all(|path| {
-        Path::new(path).file_name().is_some_and(|name| {
-            name.to_string_lossy()
-                .to_ascii_lowercase()
-                .contains("nvidia")
-        })
+    std::iter::once(first)
+        .chain(vendor_files)
+        .all(egl_vendor_manifest_selects_nvidia)
+}
+
+fn egl_vendor_manifest_selects_nvidia(path: &str) -> bool {
+    let Ok(contents) = std::fs::read_to_string(path) else {
+        return false;
+    };
+
+    serde_json::from_str::<serde_json::Value>(&contents).is_ok_and(|manifest| {
+        manifest
+            .pointer("/ICD/library_path")
+            .and_then(serde_json::Value::as_str)
+            .and_then(|library_path| Path::new(library_path).file_name())
+            .is_some_and(|library| {
+                library
+                    .to_string_lossy()
+                    .to_ascii_lowercase()
+                    .contains("nvidia")
+            })
     })
 }
 
@@ -325,15 +342,27 @@ mod tests {
 
     #[test]
     fn finds_libwayland_default_socket() {
+        use std::os::fd::AsRawFd;
+        use std::os::unix::{fs::symlink, net::UnixStream};
+
         let root = std::env::temp_dir().join(format!(
             "yay-sys-tray-wayland-socket-test-{}",
             std::process::id()
         ));
         std::fs::create_dir_all(&root).unwrap();
         let socket_path = root.join("wayland-0");
-        std::fs::write(socket_path, []).unwrap();
+        let (socket, _peer) = UnixStream::pair().unwrap();
+        symlink(
+            format!("/proc/self/fd/{}", socket.as_raw_fd()),
+            &socket_path,
+        )
+        .unwrap();
 
         assert!(default_wayland_socket_available(Some(root.as_os_str())));
+
+        std::fs::remove_file(&socket_path).unwrap();
+        std::fs::write(&socket_path, []).unwrap();
+        assert!(!default_wayland_socket_available(Some(root.as_os_str())));
 
         std::fs::remove_dir_all(root).unwrap();
     }
@@ -567,15 +596,37 @@ mod tests {
 
     #[test]
     fn glvnd_egl_vendor_file_can_select_nvidia() {
+        let root = std::env::temp_dir().join(format!(
+            "yay-sys-tray-egl-vendor-test-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let nvidia_manifest = root.join("custom-vendor.json");
+        let mesa_manifest = root.join("another-vendor.json");
+        std::fs::write(
+            &nvidia_manifest,
+            r#"{"file_format_version":"1.0.0","ICD":{"library_path":"libEGL_nvidia.so.0"}}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            &mesa_manifest,
+            r#"{"file_format_version":"1.0.0","ICD":{"library_path":"libEGL_mesa.so.0"}}"#,
+        )
+        .unwrap();
+
         assert!(egl_vendor_list_selects_nvidia(
-            "/usr/share/glvnd/egl_vendor.d/10_nvidia.json"
+            &nvidia_manifest.to_string_lossy()
         ));
         assert!(!egl_vendor_list_selects_nvidia(
-            "/usr/share/glvnd/egl_vendor.d/50_mesa.json"
+            &mesa_manifest.to_string_lossy()
         ));
-        assert!(!egl_vendor_list_selects_nvidia(
-            "/usr/share/glvnd/egl_vendor.d/10_nvidia.json:/usr/share/glvnd/egl_vendor.d/50_mesa.json"
-        ));
+        assert!(!egl_vendor_list_selects_nvidia(&format!(
+            "{}:{}",
+            nvidia_manifest.display(),
+            mesa_manifest.display()
+        )));
+
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
