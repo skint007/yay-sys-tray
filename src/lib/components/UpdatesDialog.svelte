@@ -399,8 +399,10 @@
       // A finished update triggers a targeted re-check of that host, which
       // emits no check-started — so this is the only notice the dialog gets
       // that a pending warning is about to be describing superseded results.
-      listen("update-finished", () => {
-        pending = null;
+      // Scoped to the host that finished: another host's update says nothing
+      // about the one the warning is holding.
+      listen<{ scope: string }>("update-finished", (e) => {
+        if (pending && e.payload.scope === pending.key) pending = null;
       }),
     ]);
   });
