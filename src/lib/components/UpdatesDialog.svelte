@@ -3,6 +3,8 @@
   import { listen } from "@tauri-apps/api/event";
   import type { CheckResult, HostResult, UpdateInfo } from "../types";
   import {
+    getConfig,
+    saveConfig,
     getCheckResult,
     runRemove,
     runRemoteRemove,
@@ -14,6 +16,7 @@
   } from "../ipc";
   import { repoRank, repoColorVar, AUR_REPO, UNKNOWN_REPO } from "../repo";
   import UpdateCard from "./UpdateCard.svelte";
+  import PartialUpdateWarning from "./PartialUpdateWarning.svelte";
   import Reticle from "./Reticle.svelte";
   import DependencyTree from "./DependencyTree.svelte";
   import WindowControls from "./WindowControls.svelte";
@@ -70,6 +73,17 @@
   let search = $state("");
   let primaryMenu = $state(false);
   let showDeps = $state<{ pkg: string; reverse: boolean; repo: string; host: string | null } | null>(null);
+  let warnPartialUpdates = $state(true);
+  // An update held back by the partial-update warning. Snapshotted rather than
+  // re-read on confirm: a re-check can land while the dialog waits and move the
+  // active host or its selection.
+  let pending = $state<{
+    key: string;
+    name: string;
+    packages: string[];
+    total: number;
+    restart: boolean;
+  } | null>(null);
 
   let hosts = $derived.by<Host[]>(() => {
     const list: Host[] = [];
@@ -218,9 +232,16 @@
   });
 
   let visiblePkgs = $derived(grouped.visible.map((u) => u.package));
+  let selectedSet = $derived(new Set(activeSelected));
   let selCount = $derived(activeSelected.length);
-  let allSelected = $derived(visiblePkgs.length > 0 && visiblePkgs.every((p) => activeSelected.includes(p)));
-  let pkgsIndeterminate = $derived(!allSelected && visiblePkgs.some((p) => activeSelected.includes(p)));
+  let allSelected = $derived(visiblePkgs.length > 0 && visiblePkgs.every((p) => selectedSet.has(p)));
+  let pkgsIndeterminate = $derived(!allSelected && visiblePkgs.some((p) => selectedSet.has(p)));
+  // A selection that leaves some of the host's updates behind — a partial
+  // upgrade, which is what the warning dialog is about. Measured against
+  // everything applicable on the host: not the filtered view, since selections
+  // survive the search box, and not blocked updates, which can't be selected
+  // and so would make every possible selection read as partial.
+  let partialUpdate = $derived(!!activeHost && selCount > 0 && selCount < actionable(activeHost));
   let primaryLabel = $derived.by(() => {
     if (!activeHost) return "Update";
     const base = selCount > 0 ? "Update Selected" : "Update All";
@@ -251,6 +272,10 @@
   });
 
   function beginChecking(hosts: { key: string; name: string }[]) {
+    // Results are about to be replaced, so anything the warning is holding is
+    // already on its way out — drop it now rather than let it be confirmed
+    // against numbers the scan has superseded.
+    pending = null;
     scanHosts = hosts;
     const st: Record<string, ScanStatus> = {};
     for (const h of hosts) st[h.key] = "queued";
@@ -282,7 +307,18 @@
   // removed host keeps inflating the "Update All Remote (N)" count (and would
   // still be acted on by runRemoteBulk).
   $effect(() => {
-    const validKeys = new Set(hosts.map((h) => h.key));
+    // A warning the re-check has overtaken — its host is gone, or no longer
+    // offers what the snapshot names — describes an update that can no longer
+    // run as confirmed. Drop it rather than let it be confirmed.
+    if (pending) {
+      const host = hosts.find((h) => h.key === pending!.key);
+      const offered = new Set(host?.updates.map((u) => u.package) ?? []);
+      const intact =
+        !!host &&
+        actionable(host) === pending.total &&
+        pending.packages.every((p) => offered.has(p));
+      if (!intact) pending = null;
+    }
 
     // Checked against the selectable hosts, not just the listed ones: a
     // re-check can find a host has nothing left to apply, and it must not stay
@@ -322,6 +358,16 @@
       return;
     }
 
+    // Before the results, so the update controls are never live while the
+    // partial-update warning is still on its default — someone who turned it
+    // off would otherwise be warned anyway if they were quick enough.
+    try {
+      const cfg = await getConfig();
+      warnPartialUpdates = cfg.warn_partial_updates !== false;
+    } catch (e) {
+      console.error("Failed to load config:", e);
+    }
+
     await loadResults();
     // Register the scan-progress listeners. onMount's async return value is a
     // Promise, which Svelte ignores for cleanup, so the unlisteners are torn
@@ -349,6 +395,14 @@
       listen("check-error", () => {
         checking = false;
         loadResults();
+      }),
+      // A finished update triggers a targeted re-check of that host, which
+      // emits no check-started — so this is the only notice the dialog gets
+      // that a pending warning is about to be describing superseded results.
+      // Scoped to the host that finished: another host's update says nothing
+      // about the one the warning is holding.
+      listen<{ scope: string }>("update-finished", (e) => {
+        if (pending && e.payload.scope === pending.key) pending = null;
       }),
     ]);
   });
@@ -385,18 +439,38 @@
     selectedByHost[activeKey] = cur.includes(pkg) ? cur.filter((p) => p !== pkg) : [...cur, pkg];
   }
 
-  function toggleSelectAll() {
-    // Only add/remove the packages currently visible under the search filter —
-    // selections of filtered-out packages must survive so "Update Selected"
-    // acts on the full set the user built, not just what's on screen.
+  // Only add/remove the packages currently visible under the search filter —
+  // selections of filtered-out packages must survive so "Update Selected" acts
+  // on the full set the user built, not just what's on screen.
+  function setSelected(pkgs: string[], on: boolean) {
     const cur = selectedByHost[activeKey] ?? [];
-    if (allSelected) {
-      selectedByHost[activeKey] = cur.filter((p) => !visiblePkgs.includes(p));
-    } else {
+    if (on) {
       const set = new Set(cur);
-      for (const p of visiblePkgs) set.add(p);
+      for (const p of pkgs) set.add(p);
       selectedByHost[activeKey] = [...set];
+    } else {
+      const drop = new Set(pkgs);
+      selectedByHost[activeKey] = cur.filter((p) => !drop.has(p));
     }
+  }
+
+  function toggleSelectAll() {
+    setSelected(visiblePkgs, !allSelected);
+  }
+
+  // A group header's checkbox covers only that group's visible rows, so the
+  // top-level select-all and the group boxes stay consistent with each other:
+  // every group checked === all checked.
+  function groupState(updates: UpdateInfo[]) {
+    const n = updates.reduce((acc, u) => acc + (selectedSet.has(u.package) ? 1 : 0), 0);
+    return { all: updates.length > 0 && n === updates.length, some: n > 0 && n < updates.length };
+  }
+
+  function toggleGroup(updates: UpdateInfo[]) {
+    setSelected(
+      updates.map((u) => u.package),
+      !groupState(updates).all,
+    );
   }
 
   function handleRemove(pkg: string, flags: string) {
@@ -409,20 +483,57 @@
 
   function runPrimary(restart: boolean) {
     primaryMenu = false;
-    const sel = activeSelected;
+    if (warnPartialUpdates && partialUpdate && activeHost) {
+      pending = {
+        key: activeKey,
+        name: activeHost.name,
+        packages: [...activeSelected],
+        total: actionable(activeHost),
+        restart,
+      };
+      return;
+    }
+    executePrimary(activeKey, activeSelected, restart);
+  }
+
+  function confirmPartialUpdate(dontWarnAgain: boolean) {
+    const p = pending;
+    pending = null;
+    // Runs the snapshot taken when the warning opened, and runs it before
+    // persisting the preference: both the wait for the user and the config
+    // round-trip are long enough for a re-check to land and move the selection
+    // out from under the update they confirmed.
+    if (p) executePrimary(p.key, p.packages, p.restart);
+    if (dontWarnAgain) stopWarningAboutPartialUpdates();
+  }
+
+  async function stopWarningAboutPartialUpdates() {
+    warnPartialUpdates = false;
+    // Re-read before writing: the settings view shares this config file, so
+    // saving our stale copy would undo whatever was changed there.
+    try {
+      const cfg = await getConfig();
+      cfg.warn_partial_updates = false;
+      await saveConfig(cfg);
+    } catch (e) {
+      console.error("Failed to save partial-update warning preference:", e);
+    }
+  }
+
+  function executePrimary(key: string, sel: string[], restart: boolean) {
     if (sel.length > 0) {
       const p =
-        activeKey === "local"
+        key === "local"
           ? runLocalUpdatePackages(sel, restart)
-          : runRemoteUpdatePackages(activeKey, sel, restart);
+          : runRemoteUpdatePackages(key, sel, restart);
       // The remote command rejects when the selection no longer matches that
       // host's last check. Swallowing it entirely would mean the click opened
       // no terminal and said nothing anywhere.
       p.catch((e) => console.error("update failed:", e));
-    } else if (activeKey === "local") {
+    } else if (key === "local") {
       runLocalUpdate(restart).catch(() => {});
     } else {
-      runRemoteUpdate(activeKey, restart).catch(() => {});
+      runRemoteUpdate(key, restart).catch(() => {});
     }
   }
 
@@ -613,8 +724,32 @@
       {/if}
 
       <main class="list">
+        <div class="list-head">
+          <label class="select-all">
+            <input
+              type="checkbox"
+              class="ys-check"
+              checked={allSelected}
+              indeterminate={pkgsIndeterminate}
+              onchange={toggleSelectAll}
+              aria-label="Select all packages"
+            />
+            <span>SELECT ALL</span>
+          </label>
+          <span class="sel-label">{selCount} selected</span>
+        </div>
         {#if grouped.restart.length > 0}
-          <div class="section restart"><span class="sdot"></span>RESTART REQUIRED</div>
+          <label class="section restart">
+            <input
+              type="checkbox"
+              class="ys-check sm"
+              checked={groupState(grouped.restart).all}
+              indeterminate={groupState(grouped.restart).some}
+              onchange={() => toggleGroup(grouped.restart)}
+              aria-label="Select all restart-required packages"
+            />
+            <span class="sdot"></span>RESTART REQUIRED
+          </label>
           {#each grouped.restart as u (u.package)}
             <UpdateCard
               update={u}
@@ -628,10 +763,18 @@
           {/each}
         {/if}
         {#each grouped.repos as r (r.name)}
-          <div class="section repo" style={`--c: ${repoColorVar(r.name, "--ys-pending")}`}>
+          <label class="section repo" style={`--c: ${repoColorVar(r.name, "--ys-pending")}`}>
+            <input
+              type="checkbox"
+              class="ys-check sm"
+              checked={groupState(r.updates).all}
+              indeterminate={groupState(r.updates).some}
+              onchange={() => toggleGroup(r.updates)}
+              aria-label={`Select all ${r.name} packages`}
+            />
             <span class="sdot"></span>{r.name.toUpperCase()}
             <span class="scount">{r.updates.length}</span>
-          </div>
+          </label>
           {#each r.updates as u (u.package)}
             <UpdateCard
               update={u}
@@ -664,8 +807,6 @@
 
     <footer class="footer">
       <div class="foot-left">
-        <input type="checkbox" class="ys-check" checked={allSelected} indeterminate={pkgsIndeterminate} onchange={toggleSelectAll} aria-label="Select all" />
-        <span class="sel-label">{selCount} selected</span>
         <div class="seg">
           <button class:active={density === "roomy"} onclick={() => (density = "roomy")}>Roomy</button>
           <button class:active={density === "compact"} onclick={() => (density = "compact")}>Compact</button>
@@ -698,6 +839,16 @@
   {/if}
 </div>
 
+{#if pending}
+  <PartialUpdateWarning
+    selected={pending.packages.length}
+    total={pending.total}
+    host={pending.name}
+    onconfirm={confirmPartialUpdate}
+    oncancel={() => (pending = null)}
+  />
+{/if}
+
 {#if showDeps}
   <DependencyTree packageName={showDeps.pkg} reverse={showDeps.reverse} repository={showDeps.repo} hostname={showDeps.host} onclose={() => (showDeps = null)} />
 {/if}
@@ -705,9 +856,10 @@
 <svelte:window
   onkeydown={(e) => {
     if (e.key !== "Escape") return;
-    // Dismiss the dependency-tree overlay first if it's open, rather than
-    // hiding the whole window out from under it.
-    if (showDeps) showDeps = null;
+    // Dismiss whichever overlay is open first, rather than hiding the whole
+    // window out from under it.
+    if (pending) pending = null;
+    else if (showDeps) showDeps = null;
     else onclose();
   }}
 />
@@ -853,14 +1005,31 @@
   .host.active .host-count { color: var(--ys-violet-text); background: color-mix(in srgb, var(--ys-violet-600) 22%, transparent); }
   .host.reboot .host-count { color: var(--ys-danger); background: color-mix(in srgb, var(--ys-danger) 18%, transparent); }
 
-  .list { flex: 1; min-width: 0; overflow-y: auto; display: flex; flex-direction: column; gap: 9px; padding: 2px 2px 8px; }
+  .list { flex: 1; min-width: 0; overflow-y: auto; display: flex; flex-direction: column; gap: 9px; padding: 0 2px 8px; }
+  /* Pinned to the top of the scroller so select-all stays reachable no matter
+     how far down the list you are. The negative margins let its background
+     cover the list's side padding, which rows would otherwise scroll through. */
+  .list-head {
+    position: sticky; top: 0; z-index: 2;
+    display: flex; align-items: center; justify-content: space-between; gap: 12px;
+    margin: 0 -2px; padding: 4px 2px 6px;
+    background: var(--ys-ground);
+  }
+  .select-all {
+    display: flex; align-items: center; gap: 9px; cursor: pointer;
+    font-family: var(--font-mono); font-weight: 600; font-size: 11px;
+    letter-spacing: 1.5px; color: var(--ys-text-dim);
+  }
+  .select-all:hover { color: var(--ys-text-muted); }
+  .sel-label { font-family: var(--font-mono); font-weight: 600; font-size: 12px; color: var(--ys-text-muted); }
   .section {
     display: flex; align-items: center; gap: 8px;
     font-family: var(--font-mono); font-weight: 600; font-size: 11px;
     letter-spacing: 2px; color: var(--ys-text-dim);
     margin-top: 6px; padding-left: 2px;
+    cursor: pointer;
   }
-  .section:first-child { margin-top: 0; }
+  .section:first-of-type { margin-top: 0; }
   .sdot { width: 6px; height: 6px; border-radius: 50%; }
   .section.restart { color: var(--ys-danger); }
   .section.restart .sdot { background: var(--ys-danger); }
@@ -879,7 +1048,6 @@
     background: var(--ys-titlebar); border-top: 1px solid var(--ys-line-softer);
   }
   .foot-left { display: flex; align-items: center; gap: 12px; }
-  .sel-label { font-family: var(--font-mono); font-weight: 600; font-size: 12px; color: var(--ys-text-muted); }
   .foot-right { display: flex; align-items: center; gap: 10px; }
 
   .seg { display: flex; background: var(--ys-surface); border: 1px solid var(--ys-line); border-radius: 999px; padding: 3px; gap: 2px; }
