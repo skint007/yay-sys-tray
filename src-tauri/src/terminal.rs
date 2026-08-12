@@ -23,6 +23,12 @@ struct TermSpec {
     wait_flag: Option<&'static str>,
     /// Flag that sets the window title, if supported.
     title_flag: Option<&'static str>,
+    /// Whether the terminal refuses to close its window when a command exits
+    /// non-zero very quickly, treating it as a failed spawn worth showing. The
+    /// window then outlives the command, so the launcher never returns and the
+    /// update never looks finished. Commands for these terminals go through
+    /// [`wrap_command`].
+    holds_on_fast_failure: bool,
 }
 
 /// Look up a terminal's invocation spec. Unknown terminals fall back to a
@@ -31,23 +37,24 @@ struct TermSpec {
 /// doesn't accept makes it reject the whole command line and never launch.
 fn term_spec(terminal: &str) -> TermSpec {
     match terminal {
-        "kitty" => TermSpec { argv0: &["kitty"], exec_flag: None, wait_flag: None, hold_flag: Some("--hold"), title_flag: Some("--title") },
-        "konsole" => TermSpec { argv0: &["konsole"], exec_flag: Some("-e"), wait_flag: None, hold_flag: Some("--hold"), title_flag: None },
-        "alacritty" => TermSpec { argv0: &["alacritty"], exec_flag: Some("-e"), wait_flag: None, hold_flag: Some("--hold"), title_flag: Some("--title") },
-        "foot" => TermSpec { argv0: &["foot"], exec_flag: None, wait_flag: None, hold_flag: Some("--hold"), title_flag: Some("--title") },
-        "xterm" => TermSpec { argv0: &["xterm"], exec_flag: Some("-e"), wait_flag: None, hold_flag: Some("-hold"), title_flag: Some("-T") },
-        "xfce4-terminal" => TermSpec { argv0: &["xfce4-terminal"], exec_flag: Some("-x"), wait_flag: None, hold_flag: Some("--hold"), title_flag: Some("--title") },
+        "kitty" => TermSpec { argv0: &["kitty"], exec_flag: None, wait_flag: None, hold_flag: Some("--hold"), holds_on_fast_failure: false, title_flag: Some("--title") },
+        "konsole" => TermSpec { argv0: &["konsole"], exec_flag: Some("-e"), wait_flag: None, hold_flag: Some("--hold"), holds_on_fast_failure: false, title_flag: None },
+        "alacritty" => TermSpec { argv0: &["alacritty"], exec_flag: Some("-e"), wait_flag: None, hold_flag: Some("--hold"), holds_on_fast_failure: false, title_flag: Some("--title") },
+        "foot" => TermSpec { argv0: &["foot"], exec_flag: None, wait_flag: None, hold_flag: Some("--hold"), holds_on_fast_failure: false, title_flag: Some("--title") },
+        "xterm" => TermSpec { argv0: &["xterm"], exec_flag: Some("-e"), wait_flag: None, hold_flag: Some("-hold"), holds_on_fast_failure: false, title_flag: Some("-T") },
+        "xfce4-terminal" => TermSpec { argv0: &["xfce4-terminal"], exec_flag: Some("-x"), wait_flag: None, hold_flag: Some("--hold"), holds_on_fast_failure: false, title_flag: Some("--title") },
         // gnome-terminal/ptyxis/wezterm take the command after `--`; none has a
         // usable hold flag, so leave it off rather than break the launch.
-        "gnome-terminal" => TermSpec { argv0: &["gnome-terminal"], exec_flag: Some("--"), wait_flag: Some("--wait"), hold_flag: None, title_flag: None },
+        "gnome-terminal" => TermSpec { argv0: &["gnome-terminal"], exec_flag: Some("--"), wait_flag: Some("--wait"), hold_flag: None, holds_on_fast_failure: false, title_flag: None },
         // Ptyxis needs no wait flag and offers none. A `--` command implies
         // single-instance mode, so this process *is* the terminal rather than a
         // client of a running one, and it stays alive until the command exits
         // and closes the window (#38). `--wait` would be rejected as an unknown
-        // option and nothing would launch.
-        "ptyxis" => TermSpec { argv0: &["ptyxis"], exec_flag: Some("--"), wait_flag: None, hold_flag: None, title_flag: None },
-        "wezterm" => TermSpec { argv0: &["wezterm", "start"], exec_flag: Some("--"), wait_flag: None, hold_flag: None, title_flag: None },
-        _ => TermSpec { argv0: &[], exec_flag: Some("-e"), wait_flag: None, hold_flag: None, title_flag: None },
+        // option and nothing would launch. `--title` is accepted on that same
+        // standalone path and becomes the tab's title prefix.
+        "ptyxis" => TermSpec { argv0: &["ptyxis"], exec_flag: Some("--"), wait_flag: None, hold_flag: None, holds_on_fast_failure: true, title_flag: Some("--title") },
+        "wezterm" => TermSpec { argv0: &["wezterm", "start"], exec_flag: Some("--"), wait_flag: None, hold_flag: None, holds_on_fast_failure: false, title_flag: None },
+        _ => TermSpec { argv0: &[], exec_flag: Some("-e"), wait_flag: None, hold_flag: None, holds_on_fast_failure: false, title_flag: None },
     }
 }
 
@@ -81,6 +88,34 @@ fn terminal_prefix(terminal: &str, title: Option<&str>, hold: bool) -> Vec<Strin
         out.push(flag.to_string());
     }
 
+    out
+}
+
+/// Shell run by [`wrap_command`]. `"$@"` runs the real command straight from
+/// argv, so nothing has to be re-quoted, and the sleep only costs anything on a
+/// command that already failed. The original exit status is preserved, and a
+/// command killed by a signal (which Ptyxis never closes the window for, at any
+/// speed) becomes a normal `exit 128+n` of this shell instead.
+const SLOW_FAILURE_SCRIPT: &str = r#""$@"; rc=$?; [ "$rc" -eq 0 ] || sleep 1; exit "$rc""#;
+
+/// Wrap a command for terminals that keep their window open when a command
+/// fails immediately, so it can't exit fast *and* non-zero. Without this a
+/// failed update leaves the window (and so the terminal process) alive until
+/// the user closes it by hand, and `update-finished` never fires (#43). Every
+/// other terminal gets its command unchanged.
+fn wrap_command(terminal: &str, cmd: Vec<String>) -> Vec<String> {
+    if cmd.is_empty() || !term_spec(terminal).holds_on_fast_failure {
+        return cmd;
+    }
+
+    let mut out = vec![
+        "bash".to_string(),
+        "-c".to_string(),
+        SLOW_FAILURE_SCRIPT.to_string(),
+        // $0 for the wrapper shell, so any error it prints is attributable.
+        "yay-sys-tray".to_string(),
+    ];
+    out.extend(cmd);
     out
 }
 
@@ -258,7 +293,7 @@ pub async fn run_local_update(app_handle: tauri::AppHandle, restart: bool) {
         cmd
     };
 
-    spawn_with(app_handle, prefix, yay_cmd, "local".to_string(), FinishedAction::Update).await;
+    spawn_with(app_handle, &cfg.terminal, prefix, yay_cmd, "local".to_string(), FinishedAction::Update).await;
 }
 
 /// Update only the selected local packages (`yay -S <pkgs>`).
@@ -288,7 +323,7 @@ pub async fn run_local_update_packages(
         cmd
     };
 
-    spawn_with(app_handle, prefix, yay_cmd, "local".to_string(), FinishedAction::Update).await;
+    spawn_with(app_handle, &cfg.terminal, prefix, yay_cmd, "local".to_string(), FinishedAction::Update).await;
 }
 
 /// How many of a host's pending updates came from the AUR at its last check.
@@ -316,7 +351,7 @@ pub async fn run_remote_update(app_handle: tauri::AppHandle, hostname: &str, res
         reboot_chain(restart, "sudo reboot", cfg.delay),
     );
 
-    spawn_with(app_handle, prefix, ssh_argv(target, cmd), hostname.to_string(), FinishedAction::Update).await;
+    spawn_with(app_handle, &cfg.terminal, prefix, ssh_argv(target, cmd), hostname.to_string(), FinishedAction::Update).await;
 }
 
 /// Update only the selected packages on a remote host. `selected` is every
@@ -342,7 +377,7 @@ pub async fn run_remote_update_packages(
         reboot_chain(restart, "sudo reboot", cfg.delay),
     );
 
-    spawn_with(app_handle, prefix, ssh_argv(target, cmd), hostname.to_string(), FinishedAction::Update).await;
+    spawn_with(app_handle, &cfg.terminal, prefix, ssh_argv(target, cmd), hostname.to_string(), FinishedAction::Update).await;
 }
 
 /// Remove a local package in a terminal.
@@ -355,7 +390,7 @@ pub async fn run_remove(app_handle: tauri::AppHandle, package: &str, flags: &str
         yay_cmd.push("--noconfirm".to_string());
     }
 
-    spawn_with(app_handle, prefix, yay_cmd, "local".to_string(), FinishedAction::Remove).await;
+    spawn_with(app_handle, &cfg.terminal, prefix, yay_cmd, "local".to_string(), FinishedAction::Remove).await;
 }
 
 /// Remove a package on a remote host via SSH.
@@ -373,18 +408,19 @@ pub async fn run_remote_remove(
     let base = format!("sudo pacman -{flags} {package}");
     let cmd = build_shell_cmd(&base, cfg.noconfirm, None);
 
-    spawn_with(app_handle, prefix, ssh_argv(target, cmd), hostname.to_string(), FinishedAction::Remove).await;
+    spawn_with(app_handle, &cfg.terminal, prefix, ssh_argv(target, cmd), hostname.to_string(), FinishedAction::Remove).await;
 }
 
 async fn spawn_with(
     app_handle: tauri::AppHandle,
+    terminal: &str,
     prefix: Vec<String>,
     cmd: Vec<String>,
     scope: String,
     action: FinishedAction,
 ) {
     let mut full = prefix;
-    full.extend(cmd);
+    full.extend(wrap_command(terminal, cmd));
     spawn_and_wait(app_handle, full, scope, action).await;
 }
 
@@ -517,7 +553,51 @@ mod tests {
         // until the command exits (#38). It has no `--wait` option, and adding
         // one would be rejected as unknown and stop the terminal launching.
         let prefix = terminal_prefix("ptyxis", Some("Updating: local"), true);
-        assert_eq!(prefix, vec!["ptyxis", "--"]);
+        assert_eq!(prefix, vec!["ptyxis", "--title", "Updating: local", "--"]);
+        assert!(!prefix.contains(&"--wait".to_string()));
+    }
+
+    #[test]
+    fn ptyxis_commands_cannot_fail_fast_enough_to_wedge_the_window() {
+        // Ptyxis holds the window open with a "Process Exited" banner when a
+        // command exits non-zero within half a second, which keeps the terminal
+        // process alive and so keeps update-finished from ever firing (#43).
+        let cmd = wrap_command("ptyxis", vec!["yay".into(), "-Syu".into()]);
+        assert_eq!(
+            cmd,
+            vec!["bash", "-c", SLOW_FAILURE_SCRIPT, "yay-sys-tray", "yay", "-Syu"]
+        );
+    }
+
+    #[test]
+    fn other_terminals_run_the_command_unwrapped() {
+        // The wrapper is a workaround for one terminal's heuristic, not a tax
+        // every terminal pays.
+        let cmd = vec!["yay".to_string(), "-Syu".to_string()];
+        assert_eq!(wrap_command("kitty", cmd.clone()), cmd);
+        assert_eq!(wrap_command("gnome-terminal", cmd.clone()), cmd);
+    }
+
+    #[test]
+    fn the_wrapper_keeps_the_command_exit_status() {
+        // The delay must not swallow the failure it is delaying, and arguments
+        // must reach the command as-is rather than through another round of
+        // shell quoting.
+        let run = |args: &[&str]| {
+            std::process::Command::new("bash")
+                .arg("-c")
+                .arg(SLOW_FAILURE_SCRIPT)
+                .arg("yay-sys-tray")
+                .args(args)
+                .output()
+                .expect("bash is available")
+        };
+
+        let ok = run(&["printf", "%s", "a b; c"]);
+        assert_eq!(ok.status.code(), Some(0));
+        assert_eq!(String::from_utf8_lossy(&ok.stdout), "a b; c");
+
+        assert_eq!(run(&["sh", "-c", "exit 7"]).status.code(), Some(7));
     }
 
     #[test]
