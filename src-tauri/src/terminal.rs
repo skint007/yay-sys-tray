@@ -40,6 +40,11 @@ fn term_spec(terminal: &str) -> TermSpec {
         // gnome-terminal/ptyxis/wezterm take the command after `--`; none has a
         // usable hold flag, so leave it off rather than break the launch.
         "gnome-terminal" => TermSpec { argv0: &["gnome-terminal"], exec_flag: Some("--"), wait_flag: Some("--wait"), hold_flag: None, title_flag: None },
+        // Ptyxis needs no wait flag and offers none. A `--` command implies
+        // single-instance mode, so this process *is* the terminal rather than a
+        // client of a running one, and it stays alive until the command exits
+        // and closes the window (#38). `--wait` would be rejected as an unknown
+        // option and nothing would launch.
         "ptyxis" => TermSpec { argv0: &["ptyxis"], exec_flag: Some("--"), wait_flag: None, hold_flag: None, title_flag: None },
         "wezterm" => TermSpec { argv0: &["wezterm", "start"], exec_flag: Some("--"), wait_flag: None, hold_flag: None, title_flag: None },
         _ => TermSpec { argv0: &[], exec_flag: Some("-e"), wait_flag: None, hold_flag: None, title_flag: None },
@@ -503,6 +508,16 @@ mod tests {
         // it started.
         let prefix = terminal_prefix("gnome-terminal", Some("Updating: local"), true);
         assert_eq!(prefix, vec!["gnome-terminal", "--wait", "--"]);
+    }
+
+    #[test]
+    fn ptyxis_launches_without_a_wait_flag() {
+        // Ptyxis looks like gnome-terminal but does not behave like it: a `--`
+        // command implies single-instance mode, so the process already blocks
+        // until the command exits (#38). It has no `--wait` option, and adding
+        // one would be rejected as unknown and stop the terminal launching.
+        let prefix = terminal_prefix("ptyxis", Some("Updating: local"), true);
+        assert_eq!(prefix, vec!["ptyxis", "--"]);
     }
 
     #[test]
