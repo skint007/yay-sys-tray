@@ -1,6 +1,6 @@
 [package]
 name = "yay-sys-tray"
-version = "1.6.4"
+version = "1.6.5"
 description = "Arch Linux system tray update checker"
 authors = ["skint007"]
 license = "MIT"
