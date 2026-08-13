@@ -9,12 +9,16 @@ use tokio::process::Command;
 /// a terminal is a single table entry and the flags for one terminal can't drift
 /// apart.
 struct TermSpec {
-    /// Leading argv — the program plus any subcommand (e.g. `["wezterm", "start"]`).
+    /// Leading argv — the program plus any subcommand (e.g. `["wezterm",
+    /// "start"]`) or flag that is passed on every launch.
     argv0: &'static [&'static str],
     /// Flag/separator placed just before the command to run (`-e`, `--`, `-x`),
     /// or `None` when the command is positional (kitty/foot).
     exec_flag: Option<&'static str>,
-    /// Flag that keeps the window open after the command exits, if supported.
+    /// Flag that keeps the window open after the command exits, if supported. A
+    /// flag ending in `=` is passed on every launch with `true`/`false` joined
+    /// onto it, for terminals that would otherwise read holding out of the
+    /// user's own config and ignore this app's setting (Ghostty).
     hold_flag: Option<&'static str>,
     /// Flag that makes the launcher stay alive until the command exits, for
     /// client/server terminals whose CLI otherwise returns as soon as the
@@ -60,11 +64,16 @@ fn term_spec(terminal: &str) -> TermSpec {
         // already implies `gtk-single-instance=false` plus
         // `quit-after-last-window-closed=true`, so this process owns the window
         // and lives exactly as long as the command — no wait flag needed (nor
-        // offered). Its own flags are config keys, and its CLI parser rejects a
-        // value passed as a separate argument, hence `--title=`. Like Ptyxis it
-        // keeps the window open on a command that exits non-zero within
-        // `abnormal-command-exit-runtime` (250ms by default).
-        "ghostty" => TermSpec { argv0: &["ghostty"], exec_flag: Some("-e"), wait_flag: None, hold_flag: Some("--wait-after-command=true"), holds_on_fast_failure: true, title_flag: Some("--title=") },
+        // offered). Its flags are config keys, and its CLI parser rejects a
+        // value passed as a separate argument, hence the trailing `=`. Every
+        // key also has a value in the user's ghostty config, so the ones this
+        // app has an opinion about are always passed rather than only when on.
+        // `abnormal-command-exit-runtime=0` is that same defence for Ghostty's
+        // habit of holding the window open on a command that exits non-zero
+        // within 250ms (the Ptyxis trap from #43, which the user could widen to
+        // seconds); [`wrap_command`] still covers a command that manages to
+        // exit within the same millisecond.
+        "ghostty" => TermSpec { argv0: &["ghostty", "--abnormal-command-exit-runtime=0"], exec_flag: Some("-e"), wait_flag: None, hold_flag: Some("--wait-after-command="), holds_on_fast_failure: true, title_flag: Some("--title=") },
         _ => TermSpec { argv0: &[], exec_flag: Some("-e"), wait_flag: None, hold_flag: None, holds_on_fast_failure: false, title_flag: None },
     }
 }
@@ -86,10 +95,13 @@ fn terminal_prefix(terminal: &str, title: Option<&str>, hold: bool) -> Vec<Strin
     if let Some(flag) = spec.wait_flag {
         out.push(flag.to_string());
     }
-    if hold {
-        if let Some(flag) = spec.hold_flag {
-            out.push(flag.to_string());
-        }
+    match spec.hold_flag {
+        // A flag carrying its own value can also say *not* to hold, which is
+        // the only way to override a terminal that reads its default from the
+        // user's config.
+        Some(flag) if flag.ends_with('=') => out.push(format!("{flag}{hold}")),
+        Some(flag) if hold => out.push(flag.to_string()),
+        _ => {}
     }
     if let (Some(title), Some(flag)) = (title, spec.title_flag) {
         if flag.ends_with('=') {
@@ -108,11 +120,11 @@ fn terminal_prefix(terminal: &str, title: Option<&str>, hold: bool) -> Vec<Strin
 
 /// Shell run by [`wrap_command`]. `"$@"` runs the real command straight from
 /// argv, so nothing has to be re-quoted, and the sleep only costs anything on a
-/// command that already failed. One second clears the longest "too fast to be
-/// real" window any of these terminals uses (Ptyxis 0.5s, Ghostty 250ms). The
-/// original exit status is preserved, and a command killed by a signal (which
-/// Ptyxis never closes the window for, at any speed) becomes a normal
-/// `exit 128+n` of this shell instead.
+/// command that already failed. One second clears the widest "too fast to be
+/// real" window these terminals apply (Ptyxis 0.5s; Ghostty is pinned to 0 at
+/// launch). The original exit status is preserved, and a command killed by a
+/// signal (which Ptyxis never closes the window for, at any speed) becomes a
+/// normal `exit 128+n` of this shell instead.
 const SLOW_FAILURE_SCRIPT: &str = r#""$@"; rc=$?; [ "$rc" -eq 0 ] || sleep 1; exit "$rc""#;
 
 /// Wrap a command for terminals that keep their window open when a command
@@ -594,22 +606,44 @@ mod tests {
         let prefix = terminal_prefix("ghostty", Some("Updating: local"), true);
         assert_eq!(
             prefix,
-            vec!["ghostty", "--wait-after-command=true", "--title=Updating: local", "-e"]
+            vec![
+                "ghostty",
+                "--abnormal-command-exit-runtime=0",
+                "--wait-after-command=true",
+                "--title=Updating: local",
+                "-e",
+            ]
         );
     }
 
     #[test]
-    fn ghostty_without_hold_only_gets_the_exec_flag() {
-        // `-e` has to stay last: everything after it is the command.
-        assert_eq!(terminal_prefix("ghostty", None, false), vec!["ghostty", "-e"]);
+    fn ghostty_is_told_not_to_hold_rather_than_left_to_its_config() {
+        // Every Ghostty flag is a config key the user may already have set, so
+        // omitting `wait-after-command` doesn't mean "don't hold" — it means
+        // "whatever their ghostty config says", which would leave the window
+        // (and update-finished) waiting on a keypress. `-e` stays last:
+        // everything after it is the command.
+        assert_eq!(
+            terminal_prefix("ghostty", None, false),
+            vec!["ghostty", "--abnormal-command-exit-runtime=0", "--wait-after-command=false", "-e"]
+        );
+    }
+
+    #[test]
+    fn only_ghostty_states_the_hold_it_does_not_want() {
+        // Elsewhere the hold flag is a CLI-only switch with no configured
+        // default, so a "false" form either doesn't exist or would be rejected.
+        assert_eq!(terminal_prefix("xterm", None, false), vec!["xterm", "-e"]);
+        assert_eq!(terminal_prefix("konsole", None, false), vec!["konsole", "-e"]);
     }
 
     #[test]
     fn ghostty_commands_cannot_fail_fast_enough_to_wedge_the_window() {
         // Ghostty treats a non-zero exit within abnormal-command-exit-runtime
-        // (250ms) as a failed spawn and holds the window open with an error
-        // message, which keeps update-finished from firing — the same trap
-        // Ptyxis sets (#43).
+        // as a failed spawn and holds the window open with an error message,
+        // which keeps update-finished from firing — the same trap Ptyxis sets
+        // (#43). The launch pins that threshold to 0, and the wrapper covers
+        // the one exit fast enough to still meet it.
         let cmd = wrap_command("ghostty", vec!["yay".into(), "-Syu".into()]);
         assert_eq!(
             cmd,
