@@ -109,6 +109,11 @@ Right-click the tray icon and select **Settings**. Configuration is stored in `~
 | Re-check cooldown | Minimum minutes between implicit re-checks | 5 minutes |
 | Passwordless | No sudo password for pacman (Arch only) | off |
 
+Known terminals, and what each supports: kitty, ghostty, alacritty, foot, xterm and
+xfce4-terminal take both a window title and "keep terminal open"; ptyxis takes a title
+only; konsole takes keep-open only; gnome-terminal and wezterm take neither. Any other
+terminal is launched as `<name> -e <command>`, with no title or keep-open flag.
+
 ### Tailscale
 
 | Option | Description | Default |

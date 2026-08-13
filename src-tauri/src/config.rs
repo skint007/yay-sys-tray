@@ -133,7 +133,7 @@ impl AppConfig {
 }
 
 fn detect_terminal() -> String {
-    for name in &["kitty", "alacritty", "konsole", "foot", "xterm"] {
+    for name in &["kitty", "ghostty", "alacritty", "konsole", "foot", "xterm"] {
         if which::which(name).is_ok() {
             return name.to_string();
         }
