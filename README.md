@@ -122,6 +122,10 @@ terminal is launched as `<name> -e <command>`, with no title or keep-open flag.
 | Device tags | Comma-separated Tailscale tags to filter peers | tag:server,tag:arch |
 | SSH timeout | Seconds before SSH connection times out | 10 |
 
+Remote updates require `tmux` on the remote host. The update runs in a named
+tmux session, so it keeps running if SSH disconnects. The terminal reconnects
+and reattaches automatically, including when the host reboots after updating.
+
 ## License
 
 MIT
