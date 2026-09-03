@@ -347,6 +347,11 @@ fi
 # observation-only and must never create a job that could wait for input with
 # no terminal attached.
 if [ "$mode" = status ] && { [ "$current" != "$job_id" ] || [ -z "$state" ]; }; then
+    if ! command -v tmux >/dev/null 2>&1; then
+        echo "tmux is required on the remote host for reconnectable updates." >&2
+        flock -u 9
+        exit 127
+    fi
     flock -u 9
     exit 76
 fi
@@ -705,12 +710,13 @@ fn remote_watcher_argv(job: &RemoteJob) -> Vec<String> {
 /// Wait for the durable remote state without attaching another tmux client.
 /// This task belongs to the tray process, so closing the visible terminal does
 /// not make the app report completion before the package transaction ends.
-async fn wait_for_remote_job(job: &RemoteJob) {
+async fn wait_for_remote_job(
+    job: &RemoteJob,
+    terminal_running: &std::sync::atomic::AtomicBool,
+) {
     let remote_command = job.command("status");
     let mut retry_delay = 1;
     let mut job_observed = false;
-    let start_deadline =
-        tokio::time::Instant::now() + std::time::Duration::from_secs(60);
 
     loop {
         let status = Command::new("ssh")
@@ -745,7 +751,9 @@ async fn wait_for_remote_job(job: &RemoteJob) {
         job_observed |= observed;
         match code {
             0 | 1 | 73 | 127 => return,
-            REMOTE_JOB_NOT_STARTED if tokio::time::Instant::now() < start_deadline => {
+            REMOTE_JOB_NOT_STARTED
+                if terminal_running.load(std::sync::atomic::Ordering::Acquire) =>
+            {
                 tokio::time::sleep(std::time::Duration::from_secs(1)).await;
             }
             REMOTE_JOB_RETRY => {
@@ -753,7 +761,9 @@ async fn wait_for_remote_job(job: &RemoteJob) {
                 retry_delay = 1;
                 tokio::time::sleep(std::time::Duration::from_secs(1)).await;
             }
-            255 if job_observed || tokio::time::Instant::now() < start_deadline => {
+            255 if job_observed
+                || terminal_running.load(std::sync::atomic::Ordering::Acquire) =>
+            {
                 tokio::time::sleep(std::time::Duration::from_secs(retry_delay)).await;
                 retry_delay = (retry_delay * 2).min(15);
             }
@@ -1031,12 +1041,16 @@ async fn spawn_remote_with(
     let args = &full[1..];
     match Command::new(&program).args(args).spawn() {
         Ok(mut terminal_child) => {
+            let terminal_running =
+                std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
+            let terminal_state = terminal_running.clone();
             tauri::async_runtime::spawn(async move {
                 let _ = terminal_child.wait().await;
+                terminal_state.store(false, std::sync::atomic::Ordering::Release);
             });
 
             tauri::async_runtime::spawn(async move {
-                wait_for_remote_job(&job).await;
+                wait_for_remote_job(&job, &terminal_running).await;
                 let _ = app_handle.emit(
                     "update-finished",
                     serde_json::json!({ "scope": scope, "action": "update" }),
