@@ -190,6 +190,7 @@ fn ssh_argv(target: String, cmd: String) -> Vec<String> {
 const REMOTE_JOB_RETRY: i32 = 75;
 const REMOTE_JOB_DETACHED: i32 = 74;
 const REMOTE_JOB_NOT_STARTED: i32 = 76;
+const REMOTE_JOB_OBSERVED: &str = "yay-sys-tray-job-observed";
 
 /// Runs inside tmux on the remote host. State is written before the update and
 /// before a requested reboot, which lets a later SSH connection distinguish a
@@ -258,6 +259,7 @@ runner_b64=$3
 restart=$4
 restart_delay=$5
 mode=$6
+umask 077
 case "$job_id" in
     *[!0-9-]*|'') echo "Invalid remote update job id." >&2; exit 2 ;;
 esac
@@ -270,7 +272,8 @@ job_dir=${XDG_STATE_HOME:-"$HOME/.local/state"}/yay-sys-tray/remote-update
 result_file="$job_dir/results/$job_id"
 output_file="$job_dir/output-$job_id.log"
 
-mkdir -p -m 700 "$job_dir/results"
+mkdir -p "$job_dir/results"
+chmod 700 "$job_dir" "$job_dir/results"
 exec 9> "$job_dir/lock"
 flock 9
 
@@ -303,6 +306,23 @@ case "$current" in
 esac
 current_session="yay-sys-tray-$current"
 read_state
+
+pending=
+if [ -f "$job_dir/pending" ]; then
+    read -r pending < "$job_dir/pending" || true
+fi
+
+# The request files are durable before `pending` is written. If the SSH shell
+# dies while publishing `current`, the next visible watcher can finish that
+# small transaction without rebuilding or rerunning anything.
+if [ "$current" != "$job_id" ] && [ "$pending" = "$job_id" ] && [ "$mode" = attach ]; then
+    write_state starting
+    printf '%s\n' "$job_id" > "$job_dir/current"
+    rm -f "$job_dir/pending"
+    current=$job_id
+    current_session=$session
+    state=starting
+fi
 
 # A request id is never reusable. If a late watcher returns after newer jobs
 # have run, its own result ends that watcher instead of rerunning its command.
@@ -375,7 +395,7 @@ if [ -n "$current" ] && [ "$current" != "$job_id" ] \
 fi
 
 # The package command is done, but its pane may still be flushing the final
-# output into output.log. Wait for that short cleanup instead of truncating the
+# output into its log. Wait for that short cleanup instead of truncating the
 # log for a new request underneath it.
 if [ -n "$current" ] && [ "$current" != "$job_id" ] && [ "$state" = done ] \
     && tmux has-session -t "$current_session" 2>/dev/null; then
@@ -400,9 +420,12 @@ if [ "$current" != "$job_id" ]; then
     printf '%s\n' "$restart_delay" > "$job_dir/restart-delay"
     : > "$output_file"
     chmod 700 "$job_dir/runner.sh"
-    write_state starting
+    printf '%s\n' "$job_id" > "$job_dir/pending.next"
+    mv "$job_dir/pending.next" "$job_dir/pending"
     write_result "$job_id" starting
+    write_state starting
     printf '%s\n' "$job_id" > "$job_dir/current"
+    rm -f "$job_dir/pending"
     current=$job_id
     state=starting
 fi
@@ -440,16 +463,36 @@ fi
 
 if [ "$mode" = status ]; then
     flock -u 9
+    printf '%s\n' 'yay-sys-tray-job-observed'
     starting_checks=0
     while true; do
+        flock 9
+        observed_current=
+        if [ -f "$job_dir/current" ]; then
+            read -r observed_current < "$job_dir/current" || true
+        fi
+        if [ "$observed_current" != "$job_id" ]; then
+            requested_state=
+            requested_value=
+            if [ -f "$result_file" ]; then
+                read -r requested_state requested_value < "$result_file" || true
+            fi
+            flock -u 9
+            if [ "$requested_state" = done ] && [ "$requested_value" -eq 0 ]; then
+                exit 0
+            fi
+            exit 1
+        fi
         read_state
         if [ "$state" = done ]; then
+            flock -u 9
             [ "$value" -eq 0 ] && exit 0
             exit 1
         fi
         if [ "$state" = running ] && ! tmux has-session -t "$session" 2>/dev/null; then
             write_state 'done 125'
             write_result "$job_id" 'done 125'
+            flock -u 9
             exit 1
         fi
         if [ "$state" = starting ] && ! tmux has-session -t "$session" 2>/dev/null; then
@@ -457,11 +500,13 @@ if [ "$mode" = status ]; then
             if [ "$starting_checks" -ge 6 ]; then
                 write_state 'done 125'
                 write_result "$job_id" 'done 125'
+                flock -u 9
                 exit 1
             fi
         else
             starting_checks=0
         fi
+        flock -u 9
         sleep 5
     done
 fi
@@ -663,7 +708,9 @@ fn remote_watcher_argv(job: &RemoteJob) -> Vec<String> {
 async fn wait_for_remote_job(job: &RemoteJob) {
     let remote_command = job.command("status");
     let mut retry_delay = 1;
-    let mut not_started_checks = 0;
+    let mut job_observed = false;
+    let start_deadline =
+        tokio::time::Instant::now() + std::time::Duration::from_secs(60);
 
     loop {
         let status = Command::new("ssh")
@@ -687,22 +734,26 @@ async fn wait_for_remote_job(job: &RemoteJob) {
             .output()
             .await;
 
-        let code = status
-            .ok()
-            .and_then(|status| status.status.code())
-            .unwrap_or(255);
+        let (code, observed) = status
+            .map(|status| {
+                (
+                    status.status.code().unwrap_or(255),
+                    String::from_utf8_lossy(&status.stdout).contains(REMOTE_JOB_OBSERVED),
+                )
+            })
+            .unwrap_or((255, false));
+        job_observed |= observed;
         match code {
             0 | 1 | 73 | 127 => return,
-            REMOTE_JOB_NOT_STARTED if not_started_checks < 30 => {
-                not_started_checks += 1;
+            REMOTE_JOB_NOT_STARTED if tokio::time::Instant::now() < start_deadline => {
                 tokio::time::sleep(std::time::Duration::from_secs(1)).await;
             }
             REMOTE_JOB_RETRY => {
-                not_started_checks = 0;
+                job_observed = true;
                 retry_delay = 1;
                 tokio::time::sleep(std::time::Duration::from_secs(1)).await;
             }
-            255 => {
+            255 if job_observed || tokio::time::Instant::now() < start_deadline => {
                 tokio::time::sleep(std::time::Duration::from_secs(retry_delay)).await;
                 retry_delay = (retry_delay * 2).min(15);
             }
@@ -1340,6 +1391,29 @@ esac
 
     #[cfg(unix)]
     #[test]
+    fn remote_job_files_are_private() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let fixture = RemoteJobFixture::new();
+        assert!(fixture.controller("100-15", "exit 0").status.success());
+
+        let state_dir = fixture.state_dir();
+        assert_eq!(
+            std::fs::metadata(&state_dir).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
+        assert_eq!(
+            std::fs::metadata(state_dir.join("command.b64"))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o600
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn failed_remote_job_keeps_its_result_for_reconnects() {
         let fixture = RemoteJobFixture::new();
 
@@ -1384,6 +1458,39 @@ esac
 
         assert_eq!(result.status.code(), Some(REMOTE_JOB_NOT_STARTED));
         assert!(!fixture.root.join("tmux-calls").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn reconnect_completes_an_interrupted_request_activation() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let fixture = RemoteJobFixture::new();
+        let state_dir = fixture.state_dir();
+        let count = fixture.root.join("activation-count");
+        let update = format!("printf x >> '{}'", count.display());
+
+        std::fs::create_dir_all(state_dir.join("results")).unwrap();
+        std::fs::write(state_dir.join("current"), "100-1\n").unwrap();
+        std::fs::write(state_dir.join("state"), "starting\n").unwrap();
+        std::fs::write(state_dir.join("pending"), "100-45\n").unwrap();
+        std::fs::write(state_dir.join("results/100-45"), "starting\n").unwrap();
+        std::fs::write(state_dir.join("command.b64"), encode_remote_value(&update)).unwrap();
+        std::fs::write(state_dir.join("runner.sh"), REMOTE_JOB_RUNNER).unwrap();
+        std::fs::write(state_dir.join("restart"), "0\n").unwrap();
+        std::fs::write(state_dir.join("restart-delay"), "0\n").unwrap();
+        std::fs::write(state_dir.join("output-100-45.log"), "").unwrap();
+        std::fs::set_permissions(
+            state_dir.join("runner.sh"),
+            std::fs::Permissions::from_mode(0o700),
+        )
+        .unwrap();
+
+        let result = fixture.controller("100-45", "exit 99");
+
+        assert!(result.status.success());
+        assert_eq!(std::fs::read_to_string(count).unwrap(), "x");
+        assert!(!state_dir.join("pending").exists());
     }
 
     #[cfg(unix)]
