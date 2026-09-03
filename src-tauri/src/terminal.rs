@@ -191,6 +191,7 @@ const REMOTE_JOB_RETRY: i32 = 75;
 const REMOTE_JOB_DETACHED: i32 = 74;
 const REMOTE_JOB_NOT_STARTED: i32 = 76;
 const REMOTE_JOB_OBSERVED: &str = "yay-sys-tray-job-observed";
+const REMOTE_POST_TERMINAL_PROBES: u8 = 12;
 
 /// Runs inside tmux on the remote host. State is written before the update and
 /// before a requested reboot, which lets a later SSH connection distinguish a
@@ -315,13 +316,18 @@ fi
 # The request files are durable before `pending` is written. If the SSH shell
 # dies while publishing `current`, the next visible watcher can finish that
 # small transaction without rebuilding or rerunning anything.
-if [ "$current" != "$job_id" ] && [ "$pending" = "$job_id" ] && [ "$mode" = attach ]; then
-    write_state starting
-    printf '%s\n' "$job_id" > "$job_dir/current"
-    rm -f "$job_dir/pending"
-    current=$job_id
-    current_session=$session
-    state=starting
+if [ "$current" != "$job_id" ] && [ "$pending" = "$job_id" ]; then
+    if [ "$mode" = status ]; then
+        flock -u 9
+        exit 76
+    else
+        write_state starting
+        printf '%s\n' "$job_id" > "$job_dir/current"
+        rm -f "$job_dir/pending"
+        current=$job_id
+        current_session=$session
+        state=starting
+    fi
 fi
 
 # A request id is never reusable. If a late watcher returns after newer jobs
@@ -707,6 +713,22 @@ fn remote_watcher_argv(job: &RemoteJob) -> Vec<String> {
     ]
 }
 
+fn keep_waiting_for_unobserved_job(
+    job_observed: bool,
+    terminal_running: bool,
+    post_terminal_probes: &mut u8,
+) -> bool {
+    if job_observed || terminal_running {
+        *post_terminal_probes = 0;
+        return true;
+    }
+    if *post_terminal_probes >= REMOTE_POST_TERMINAL_PROBES {
+        return false;
+    }
+    *post_terminal_probes += 1;
+    true
+}
+
 /// Wait for the durable remote state without attaching another tmux client.
 /// This task belongs to the tray process, so closing the visible terminal does
 /// not make the app report completion before the package transaction ends.
@@ -717,6 +739,7 @@ async fn wait_for_remote_job(
     let remote_command = job.command("status");
     let mut retry_delay = 1;
     let mut job_observed = false;
+    let mut post_terminal_probes = 0;
 
     loop {
         let status = Command::new("ssh")
@@ -749,11 +772,17 @@ async fn wait_for_remote_job(
             })
             .unwrap_or((255, false));
         job_observed |= observed;
+        let terminal_running = terminal_running.load(std::sync::atomic::Ordering::Acquire);
         match code {
             0 | 1 | 73 | 127 => return,
-            REMOTE_JOB_NOT_STARTED
-                if terminal_running.load(std::sync::atomic::Ordering::Acquire) =>
-            {
+            REMOTE_JOB_NOT_STARTED => {
+                if !keep_waiting_for_unobserved_job(
+                    job_observed,
+                    terminal_running,
+                    &mut post_terminal_probes,
+                ) {
+                    return;
+                }
                 tokio::time::sleep(std::time::Duration::from_secs(1)).await;
             }
             REMOTE_JOB_RETRY => {
@@ -761,9 +790,14 @@ async fn wait_for_remote_job(
                 retry_delay = 1;
                 tokio::time::sleep(std::time::Duration::from_secs(1)).await;
             }
-            255 if job_observed
-                || terminal_running.load(std::sync::atomic::Ordering::Acquire) =>
-            {
+            255 => {
+                if !keep_waiting_for_unobserved_job(
+                    job_observed,
+                    terminal_running,
+                    &mut post_terminal_probes,
+                ) {
+                    return;
+                }
                 tokio::time::sleep(std::time::Duration::from_secs(retry_delay)).await;
                 retry_delay = (retry_delay * 2).min(15);
             }
@@ -1299,6 +1333,20 @@ mod tests {
         assert!(!terminal_prefix("konsole", None, true).contains(&"--wait".to_string()));
     }
 
+    #[test]
+    fn an_unobserved_job_gets_a_bounded_post_terminal_probe_window() {
+        let mut probes = 0;
+        for _ in 0..REMOTE_POST_TERMINAL_PROBES {
+            assert!(keep_waiting_for_unobserved_job(false, false, &mut probes));
+        }
+        assert!(!keep_waiting_for_unobserved_job(false, false, &mut probes));
+
+        assert!(keep_waiting_for_unobserved_job(false, true, &mut probes));
+        assert_eq!(probes, 0);
+        assert!(keep_waiting_for_unobserved_job(true, false, &mut probes));
+        assert_eq!(probes, 0);
+    }
+
 
     #[cfg(unix)]
     struct RemoteJobFixture {
@@ -1472,6 +1520,26 @@ esac
 
         assert_eq!(result.status.code(), Some(REMOTE_JOB_NOT_STARTED));
         assert!(!fixture.root.join("tmux-calls").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn status_poll_waits_for_a_pending_activation() {
+        let fixture = RemoteJobFixture::new();
+        let state_dir = fixture.state_dir();
+        std::fs::create_dir_all(state_dir.join("results")).unwrap();
+        std::fs::write(state_dir.join("current"), "100-1\n").unwrap();
+        std::fs::write(state_dir.join("state"), "starting\n").unwrap();
+        std::fs::write(state_dir.join("pending"), "100-42\n").unwrap();
+        std::fs::write(state_dir.join("results/100-42"), "starting\n").unwrap();
+
+        let result = fixture.controller_mode("100-42", "exit 0", "status");
+
+        assert_eq!(result.status.code(), Some(REMOTE_JOB_NOT_STARTED));
+        assert_eq!(
+            std::fs::read_to_string(state_dir.join("current")).unwrap(),
+            "100-1\n"
+        );
     }
 
     #[cfg(unix)]
