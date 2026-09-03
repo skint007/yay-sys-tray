@@ -441,7 +441,7 @@ fn setup_platform_tray(app: &tauri::App) -> Result<(), Box<dyn std::error::Error
 #[cfg(target_os = "linux")]
 fn image_to_ksni_icon(image: &Image<'_>) -> ksni::Icon {
     let mut argb = Vec::with_capacity(image.rgba().len());
-    for rgba in image.rgba().chunks_exact(4) {
+    for rgba in image.rgba().as_chunks::<4>().0 {
         argb.extend_from_slice(&[rgba[3], rgba[0], rgba[1], rgba[2]]);
     }
     ksni::Icon {
