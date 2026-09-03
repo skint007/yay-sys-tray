@@ -188,6 +188,7 @@ fn ssh_argv(target: String, cmd: String) -> Vec<String> {
 }
 
 const REMOTE_JOB_RETRY: i32 = 75;
+const REMOTE_JOB_DETACHED: i32 = 74;
 
 /// Runs inside tmux on the remote host. State is written before the update and
 /// before a requested reboot, which lets a later SSH connection distinguish a
@@ -196,6 +197,7 @@ const REMOTE_JOB_RUNNER: &str = r#"#!/usr/bin/env bash
 set +e
 
 job_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+tmux set-window-option -t "$TMUX_PANE" remain-on-exit off
 exec > >(tee -a "$job_dir/output.log") 2>&1
 
 write_state() {
@@ -251,6 +253,7 @@ command_b64=$2
 runner_b64=$3
 restart=$4
 restart_delay=$5
+mode=$6
 session="yay-sys-tray-$job_id"
 job_dir=${XDG_STATE_HOME:-"$HOME/.local/state"}/yay-sys-tray/remote-update
 
@@ -364,7 +367,7 @@ fi
 
 if [ "$state" = done ]; then
     flock -u 9
-    if [ -s "$job_dir/output.log" ]; then
+    if [ "$mode" = attach ] && [ -s "$job_dir/output.log" ]; then
         cat "$job_dir/output.log"
     fi
     if [ "$value" -eq 0 ]; then
@@ -374,9 +377,15 @@ if [ "$state" = done ]; then
     exit 1
 fi
 
-echo "Attached to the remote update. Press Ctrl+C to stop watching; the update will continue."
+if [ "$mode" = status ]; then
+    flock -u 9
+    exit 75
+fi
+
+echo "Attached to the remote update. Press Ctrl+B, then D to stop watching; the update will continue."
 flock -u 9
 tmux attach-session -t "$session"
+attach_rc=$?
 
 # A normal detach or pane exit returns here. Read the durable result rather
 # than trusting tmux's status, which does not carry the pane's exit code.
@@ -388,6 +397,7 @@ if [ "$state" = done ]; then
     echo "Remote update failed with exit status $value." >&2
     exit 1
 fi
+[ "$attach_rc" -eq 0 ] && exit 74
 exit 75
 "#;
 
@@ -395,7 +405,13 @@ fn encode_remote_value(value: &str) -> String {
     base64::engine::general_purpose::STANDARD.encode(value)
 }
 
-fn remote_job_command(job_id: &str, update_command: &str, restart: bool, delay: u32) -> String {
+fn remote_job_command(
+    job_id: &str,
+    update_command: &str,
+    restart: bool,
+    delay: u32,
+    mode: &str,
+) -> String {
     let controller = encode_remote_value(REMOTE_JOB_CONTROLLER);
     let runner = encode_remote_value(REMOTE_JOB_RUNNER);
     let command = encode_remote_value(update_command);
@@ -406,8 +422,41 @@ fn remote_job_command(job_id: &str, update_command: &str, restart: bool, delay: 
     // second escaping scheme for the update command itself.
     format!(
         "bash -c \"$(printf %s '{controller}' | base64 -d)\" yay-sys-tray \
-         '{job_id}' '{command}' '{runner}' '{restart}' '{delay}'"
+         '{job_id}' '{command}' '{runner}' '{restart}' '{delay}' '{mode}'"
     )
+}
+
+#[derive(Clone)]
+struct RemoteJob {
+    id: String,
+    target: String,
+    update_command: String,
+    restart: bool,
+    delay: u32,
+    timeout: u32,
+}
+
+impl RemoteJob {
+    fn new(target: String, update_command: String, restart: bool, delay: u32, timeout: u32) -> Self {
+        Self {
+            id: remote_job_id(),
+            target,
+            update_command,
+            restart,
+            delay,
+            timeout,
+        }
+    }
+
+    fn command(&self, mode: &str) -> String {
+        remote_job_command(
+            &self.id,
+            &self.update_command,
+            self.restart,
+            self.delay,
+            mode,
+        )
+    }
 }
 
 fn remote_job_id() -> String {
@@ -432,6 +481,10 @@ pub fn run_remote_update_watcher_from_args() -> Option<i32> {
         eprintln!("Missing remote update target.");
         return Some(2);
     };
+    let Some(job_id) = args.next() else {
+        eprintln!("Missing remote update job id.");
+        return Some(2);
+    };
     let Some(update_command) = args.next() else {
         eprintln!("Missing remote update command.");
         return Some(2);
@@ -440,36 +493,23 @@ pub fn run_remote_update_watcher_from_args() -> Option<i32> {
     let delay = args.next().and_then(|value| value.parse().ok()).unwrap_or(0);
     let timeout = args.next().and_then(|value| value.parse().ok()).unwrap_or(10);
 
-    Some(watch_remote_update(&target, &update_command, restart, delay, timeout))
-}
-
-fn watch_remote_update(
-    target: &str,
-    update_command: &str,
-    restart: bool,
-    delay: u32,
-    timeout: u32,
-) -> i32 {
-    watch_remote_update_with_ssh(
-        std::ffi::OsStr::new("ssh"),
+    let job = RemoteJob {
+        id: job_id,
         target,
         update_command,
         restart,
         delay,
         timeout,
-    )
+    };
+    Some(watch_remote_update(&job))
 }
 
-fn watch_remote_update_with_ssh(
-    ssh: &std::ffi::OsStr,
-    target: &str,
-    update_command: &str,
-    restart: bool,
-    delay: u32,
-    timeout: u32,
-) -> i32 {
-    let job_id = remote_job_id();
-    let remote_command = remote_job_command(&job_id, update_command, restart, delay);
+fn watch_remote_update(job: &RemoteJob) -> i32 {
+    watch_remote_update_with_ssh(std::ffi::OsStr::new("ssh"), job)
+}
+
+fn watch_remote_update_with_ssh(ssh: &std::ffi::OsStr, job: &RemoteJob) -> i32 {
+    let remote_command = job.command("attach");
     let mut retry_delay = 1;
 
     loop {
@@ -481,10 +521,10 @@ fn watch_remote_update_with_ssh(
                 "-o",
                 "ServerAliveCountMax=3",
                 "-o",
-                &format!("ConnectTimeout={}", timeout.max(1)),
+                &format!("ConnectTimeout={}", job.timeout.max(1)),
                 "-o",
                 "ConnectionAttempts=1",
-                target,
+                &job.target,
                 &remote_command,
             ])
             .status();
@@ -495,6 +535,10 @@ fn watch_remote_update_with_ssh(
                 .ok_or_else(|| std::io::Error::other("ssh ended without an exit status"))
         }) {
             Ok(0) => return 0,
+            Ok(REMOTE_JOB_DETACHED) => {
+                eprintln!("Stopped watching. The remote update is still running.");
+                return 0;
+            }
             Ok(REMOTE_JOB_RETRY) => {
                 retry_delay = 1;
                 eprintln!("Remote update still running. Reattaching in 1s...");
@@ -512,13 +556,7 @@ fn watch_remote_update_with_ssh(
     }
 }
 
-fn remote_watcher_argv(
-    target: String,
-    update_command: String,
-    restart: bool,
-    delay: u32,
-    timeout: u32,
-) -> Vec<String> {
+fn remote_watcher_argv(job: &RemoteJob) -> Vec<String> {
     let executable = std::env::current_exe()
         .unwrap_or_else(|_| std::path::PathBuf::from("yay-sys-tray"))
         .to_string_lossy()
@@ -526,12 +564,61 @@ fn remote_watcher_argv(
     vec![
         executable,
         "--remote-update-watch".to_string(),
-        target,
-        update_command,
-        u8::from(restart).to_string(),
-        delay.to_string(),
-        timeout.to_string(),
+        job.target.clone(),
+        job.id.clone(),
+        job.update_command.clone(),
+        u8::from(job.restart).to_string(),
+        job.delay.to_string(),
+        job.timeout.to_string(),
     ]
+}
+
+/// Wait for the durable remote state without attaching another tmux client.
+/// This task belongs to the tray process, so closing the visible terminal does
+/// not make the app report completion before the package transaction ends.
+async fn wait_for_remote_job(job: &RemoteJob) {
+    let remote_command = job.command("status");
+    let mut retry_delay = 1;
+
+    loop {
+        let status = Command::new("ssh")
+            .args([
+                "-T",
+                "-o",
+                "BatchMode=yes",
+                "-o",
+                "StrictHostKeyChecking=no",
+                "-o",
+                "ServerAliveInterval=5",
+                "-o",
+                "ServerAliveCountMax=3",
+                "-o",
+                &format!("ConnectTimeout={}", job.timeout.max(1)),
+                "-o",
+                "ConnectionAttempts=1",
+                &job.target,
+                &remote_command,
+            ])
+            .output()
+            .await;
+
+        let code = status
+            .ok()
+            .and_then(|status| status.status.code())
+            .unwrap_or(255);
+        match code {
+            0 | 1 | 73 | 127 => return,
+            REMOTE_JOB_RETRY => {
+                retry_delay = 1;
+                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+            }
+            255 => {
+                tokio::time::sleep(std::time::Duration::from_secs(retry_delay)).await;
+                retry_delay = (retry_delay * 2).min(15);
+            }
+            _ => return,
+        }
+    }
 }
 
 /// Full-system update for a remote host.
@@ -711,8 +798,9 @@ pub async fn run_remote_update(app_handle: tauri::AppHandle, hostname: &str, res
 
     let cmd = remote_full_update_cmd(cfg.noconfirm, aur_pending);
 
-    let watcher = remote_watcher_argv(target, cmd, restart, cfg.delay, cfg.ssh_timeout);
-    spawn_with(app_handle, &cfg.terminal, prefix, watcher, hostname.to_string(), FinishedAction::Update).await;
+    let job = RemoteJob::new(target, cmd, restart, cfg.delay, cfg.ssh_timeout);
+    let watcher = remote_watcher_argv(&job);
+    spawn_remote_with(app_handle, &cfg.terminal, prefix, watcher, job, hostname.to_string()).await;
 }
 
 /// Update only the selected packages on a remote host. `selected` is every
@@ -735,8 +823,9 @@ pub async fn run_remote_update_packages(
 
     let cmd = remote_install_cmd(&selected, &repo_only, cfg.noconfirm);
 
-    let watcher = remote_watcher_argv(target, cmd, restart, cfg.delay, cfg.ssh_timeout);
-    spawn_with(app_handle, &cfg.terminal, prefix, watcher, hostname.to_string(), FinishedAction::Update).await;
+    let job = RemoteJob::new(target, cmd, restart, cfg.delay, cfg.ssh_timeout);
+    let watcher = remote_watcher_argv(&job);
+    spawn_remote_with(app_handle, &cfg.terminal, prefix, watcher, job, hostname.to_string()).await;
 }
 
 /// Remove a local package in a terminal.
@@ -781,6 +870,40 @@ async fn spawn_with(
     let mut full = prefix;
     full.extend(wrap_command(terminal, cmd));
     spawn_and_wait(app_handle, full, scope, action).await;
+}
+
+async fn spawn_remote_with(
+    app_handle: tauri::AppHandle,
+    terminal: &str,
+    prefix: Vec<String>,
+    cmd: Vec<String>,
+    job: RemoteJob,
+    scope: String,
+) {
+    let mut full = prefix;
+    full.extend(wrap_command(terminal, cmd));
+    if full.is_empty() {
+        return;
+    }
+
+    let program = full[0].clone();
+    let args = &full[1..];
+    match Command::new(&program).args(args).spawn() {
+        Ok(mut terminal_child) => {
+            tauri::async_runtime::spawn(async move {
+                let _ = terminal_child.wait().await;
+            });
+
+            tauri::async_runtime::spawn(async move {
+                wait_for_remote_job(&job).await;
+                let _ = app_handle.emit(
+                    "update-finished",
+                    serde_json::json!({ "scope": scope, "action": "update" }),
+                );
+            });
+        }
+        Err(e) => log::error!("Failed to spawn terminal: {e}"),
+    }
 }
 
 /// Spawn a terminal command, wait for it to finish, then emit update-finished
@@ -1046,15 +1169,17 @@ mod tests {
                 &tmux,
                 r#"#!/usr/bin/env bash
 session="$XDG_STATE_HOME/fake-tmux-session"
+printf '%s\n' "$*" >> "$XDG_STATE_HOME/tmux-calls"
 case "$1" in
     has-session) test -f "$session" ;;
     new-session)
         touch "$session"
-        "$5"
+        TMUX_PANE=%0 "$5"
         rm -f "$session"
         exit 0
         ;;
     attach-session) exit 0 ;;
+    set-window-option) exit 0 ;;
     *) exit 2 ;;
 esac
 "#,
@@ -1066,6 +1191,15 @@ esac
         }
 
         fn controller(&self, job_id: &str, update_command: &str) -> std::process::Output {
+            self.controller_mode(job_id, update_command, "attach")
+        }
+
+        fn controller_mode(
+            &self,
+            job_id: &str,
+            update_command: &str,
+            mode: &str,
+        ) -> std::process::Output {
             let path = format!(
                 "{}:{}",
                 self.fake_bin.display(),
@@ -1073,7 +1207,7 @@ esac
             );
             std::process::Command::new("bash")
                 .arg("-c")
-                .arg(remote_job_command(job_id, update_command, false, 0))
+                .arg(remote_job_command(job_id, update_command, false, 0, mode))
                 .env("XDG_STATE_HOME", &self.root)
                 .env("PATH", path)
                 .output()
@@ -1106,6 +1240,11 @@ esac
         assert_eq!(
             std::fs::read_to_string(fixture.state_dir().join("state")).unwrap(),
             "done 0\n"
+        );
+        assert!(
+            std::fs::read_to_string(fixture.root.join("tmux-calls"))
+                .unwrap()
+                .contains("set-window-option -t %0 remain-on-exit off")
         );
     }
 
@@ -1142,8 +1281,24 @@ esac
 
         let result = fixture.controller("reboot-job", "exit 0");
 
-        assert_eq!(result.status.code(), Some(REMOTE_JOB_RETRY));
+        assert_eq!(result.status.code(), Some(REMOTE_JOB_DETACHED));
         assert!(String::from_utf8_lossy(&result.stdout).contains("Attached to the remote update"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn status_poll_does_not_attach_to_the_tmux_session() {
+        let fixture = RemoteJobFixture::new();
+        let state_dir = fixture.state_dir();
+        std::fs::create_dir_all(&state_dir).unwrap();
+        std::fs::write(state_dir.join("current"), "active-job\n").unwrap();
+        std::fs::write(state_dir.join("state"), "running\n").unwrap();
+        std::fs::write(fixture.root.join("fake-tmux-session"), "").unwrap();
+
+        let result = fixture.controller_mode("active-job", "exit 0", "status");
+
+        assert_eq!(result.status.code(), Some(REMOTE_JOB_RETRY));
+        assert!(!String::from_utf8_lossy(&result.stdout).contains("Attached"));
     }
 
     #[cfg(unix)]
@@ -1195,14 +1350,15 @@ test "$count" -gt 1 || exit 255
         let count = fixture.root.join("update-count");
         let update = format!("printf x >> '{}'", count.display());
 
-        let result = watch_remote_update_with_ssh(
-            ssh.as_os_str(),
-            "test-host",
-            &update,
-            false,
-            0,
-            1,
-        );
+        let job = RemoteJob {
+            id: "retry-job".to_string(),
+            target: "test-host".to_string(),
+            update_command: update,
+            restart: false,
+            delay: 0,
+            timeout: 1,
+        };
+        let result = watch_remote_update_with_ssh(ssh.as_os_str(), &job);
 
         assert_eq!(result, 0);
         assert_eq!(std::fs::read_to_string(count).unwrap(), "x");
