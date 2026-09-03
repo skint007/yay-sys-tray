@@ -189,6 +189,7 @@ fn ssh_argv(target: String, cmd: String) -> Vec<String> {
 
 const REMOTE_JOB_RETRY: i32 = 75;
 const REMOTE_JOB_DETACHED: i32 = 74;
+const REMOTE_JOB_NOT_STARTED: i32 = 76;
 
 /// Runs inside tmux on the remote host. State is written before the update and
 /// before a requested reboot, which lets a later SSH connection distinguish a
@@ -197,11 +198,14 @@ const REMOTE_JOB_RUNNER: &str = r#"#!/usr/bin/env bash
 set +e
 
 job_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+job_id=$(cat "$job_dir/current")
 tmux set-window-option -t "$TMUX_PANE" remain-on-exit off
-exec > >(tee -a "$job_dir/output.log") 2>&1
+exec > >(tee -a "$job_dir/output-$job_id.log") 2>&1
 
 write_state() {
     printf '%s\n' "$1" > "$job_dir/state.next" && mv "$job_dir/state.next" "$job_dir/state"
+    printf '%s\n' "$1" > "$job_dir/results/$job_id.next" \
+        && mv "$job_dir/results/$job_id.next" "$job_dir/results/$job_id"
 }
 
 write_state running
@@ -254,10 +258,19 @@ runner_b64=$3
 restart=$4
 restart_delay=$5
 mode=$6
+case "$job_id" in
+    *[!0-9-]*|'') echo "Invalid remote update job id." >&2; exit 2 ;;
+esac
+case "$mode" in
+    attach|status) ;;
+    *) echo "Invalid remote update mode." >&2; exit 2 ;;
+esac
 session="yay-sys-tray-$job_id"
 job_dir=${XDG_STATE_HOME:-"$HOME/.local/state"}/yay-sys-tray/remote-update
+result_file="$job_dir/results/$job_id"
+output_file="$job_dir/output-$job_id.log"
 
-mkdir -p -m 700 "$job_dir"
+mkdir -p -m 700 "$job_dir/results"
 exec 9> "$job_dir/lock"
 flock 9
 
@@ -273,28 +286,69 @@ write_state() {
     printf '%s\n' "$1" > "$job_dir/state.next" && mv "$job_dir/state.next" "$job_dir/state"
 }
 
+write_result() {
+    id=$1
+    result=$2
+    [ -n "$id" ] || return
+    printf '%s\n' "$result" > "$job_dir/results/$id.next" \
+        && mv "$job_dir/results/$id.next" "$job_dir/results/$id"
+}
+
 current=
 if [ -f "$job_dir/current" ]; then
     read -r current < "$job_dir/current" || true
 fi
+case "$current" in
+    *[!0-9-]*) current= ;;
+esac
 current_session="yay-sys-tray-$current"
 read_state
+
+# A request id is never reusable. If a late watcher returns after newer jobs
+# have run, its own result ends that watcher instead of rerunning its command.
+if [ "$current" != "$job_id" ] && [ -f "$result_file" ]; then
+    requested_state=
+    requested_value=
+    read -r requested_state requested_value < "$result_file" || true
+    flock -u 9
+    if [ "$requested_state" = done ]; then
+        if [ "$mode" = attach ] && [ -s "$output_file" ]; then
+            cat "$output_file"
+        fi
+        [ "$requested_value" -eq 0 ] && exit 0
+        echo "Remote update failed with exit status $requested_value." >&2
+        exit 1
+    fi
+    echo "This remote update request is no longer active." >&2
+    exit 1
+fi
+
+# The tray's background monitor may arrive before the visible terminal. It is
+# observation-only and must never create a job that could wait for input with
+# no terminal attached.
+if [ "$mode" = status ] && { [ "$current" != "$job_id" ] || [ -z "$state" ]; }; then
+    flock -u 9
+    exit 76
+fi
 
 # Reconcile the old job before deciding whether this request may replace it.
 if [ "$state" = rebooting ]; then
     boot_id=$(cat /proc/sys/kernel/random/boot_id)
     if [ "$boot_id" != "$value" ]; then
         write_state 'done 0'
+        write_result "$current" 'done 0'
         state=done
         value=0
     fi
 elif [ "$state" = running ] && ! tmux has-session -t "$current_session" 2>/dev/null; then
     write_state 'done 125'
+    write_result "$current" 'done 125'
     state=done
     value=125
 elif [ "$state" = starting ] && [ "$current" != "$job_id" ] \
     && ! tmux has-session -t "$current_session" 2>/dev/null; then
     write_state 'done 125'
+    write_result "$current" 'done 125'
     state=done
     value=125
 fi
@@ -306,9 +360,10 @@ if [ "$current" = "$job_id" ] && [ -z "$state" ]; then
     printf '%s' "$runner_b64" | base64 -d > "$job_dir/runner.sh"
     printf '%s\n' "$restart" > "$job_dir/restart"
     printf '%s\n' "$restart_delay" > "$job_dir/restart-delay"
-    : > "$job_dir/output.log"
+    : > "$output_file"
     chmod 700 "$job_dir/runner.sh"
     write_state starting
+    write_result "$job_id" starting
     state=starting
 fi
 
@@ -336,21 +391,27 @@ if [ "$current" != "$job_id" ]; then
         exit 127
     fi
 
+    if [ -n "$current" ]; then
+        rm -f "$job_dir/output-$current.log"
+    fi
     printf '%s' "$command_b64" > "$job_dir/command.b64"
     printf '%s' "$runner_b64" | base64 -d > "$job_dir/runner.sh"
     printf '%s\n' "$restart" > "$job_dir/restart"
     printf '%s\n' "$restart_delay" > "$job_dir/restart-delay"
+    : > "$output_file"
     chmod 700 "$job_dir/runner.sh"
     write_state starting
+    write_result "$job_id" starting
     printf '%s\n' "$job_id" > "$job_dir/current"
     current=$job_id
     state=starting
 fi
 
-if [ "$state" = starting ]; then
+if [ "$state" = starting ] && [ "$mode" = attach ]; then
     if ! tmux has-session -t "$session" 2>/dev/null; then
         if ! tmux new-session -d -s "$session" "$job_dir/runner.sh"; then
             write_state 'done 125'
+            write_result "$job_id" 'done 125'
             flock -u 9
             echo "Could not start the remote tmux session." >&2
             exit 1
@@ -367,8 +428,8 @@ fi
 
 if [ "$state" = done ]; then
     flock -u 9
-    if [ "$mode" = attach ] && [ -s "$job_dir/output.log" ]; then
-        cat "$job_dir/output.log"
+    if [ "$mode" = attach ] && [ -s "$output_file" ]; then
+        cat "$output_file"
     fi
     if [ "$value" -eq 0 ]; then
         exit 0
@@ -379,7 +440,30 @@ fi
 
 if [ "$mode" = status ]; then
     flock -u 9
-    exit 75
+    starting_checks=0
+    while true; do
+        read_state
+        if [ "$state" = done ]; then
+            [ "$value" -eq 0 ] && exit 0
+            exit 1
+        fi
+        if [ "$state" = running ] && ! tmux has-session -t "$session" 2>/dev/null; then
+            write_state 'done 125'
+            write_result "$job_id" 'done 125'
+            exit 1
+        fi
+        if [ "$state" = starting ] && ! tmux has-session -t "$session" 2>/dev/null; then
+            starting_checks=$((starting_checks + 1))
+            if [ "$starting_checks" -ge 6 ]; then
+                write_state 'done 125'
+                write_result "$job_id" 'done 125'
+                exit 1
+            fi
+        else
+            starting_checks=0
+        fi
+        sleep 5
+    done
 fi
 
 echo "Attached to the remote update. Press Ctrl+B, then D to stop watching; the update will continue."
@@ -579,6 +663,7 @@ fn remote_watcher_argv(job: &RemoteJob) -> Vec<String> {
 async fn wait_for_remote_job(job: &RemoteJob) {
     let remote_command = job.command("status");
     let mut retry_delay = 1;
+    let mut not_started_checks = 0;
 
     loop {
         let status = Command::new("ssh")
@@ -608,7 +693,12 @@ async fn wait_for_remote_job(job: &RemoteJob) {
             .unwrap_or(255);
         match code {
             0 | 1 | 73 | 127 => return,
+            REMOTE_JOB_NOT_STARTED if not_started_checks < 30 => {
+                not_started_checks += 1;
+                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+            }
             REMOTE_JOB_RETRY => {
+                not_started_checks = 0;
                 retry_delay = 1;
                 tokio::time::sleep(std::time::Duration::from_secs(1)).await;
             }
@@ -1233,8 +1323,8 @@ esac
         let count = fixture.root.join("count");
         let update = format!("printf x >> '{}'", count.display());
 
-        assert!(fixture.controller("same-job", &update).status.success());
-        assert!(fixture.controller("same-job", &update).status.success());
+        assert!(fixture.controller("100-10", &update).status.success());
+        assert!(fixture.controller("100-10", &update).status.success());
 
         assert_eq!(std::fs::read_to_string(count).unwrap(), "x");
         assert_eq!(
@@ -1253,8 +1343,8 @@ esac
     fn failed_remote_job_keeps_its_result_for_reconnects() {
         let fixture = RemoteJobFixture::new();
 
-        let first = fixture.controller("failed-job", "exit 7");
-        let second = fixture.controller("failed-job", "exit 0");
+        let first = fixture.controller("100-20", "exit 7");
+        let second = fixture.controller("100-20", "exit 0");
 
         assert_eq!(first.status.code(), Some(1));
         assert_eq!(second.status.code(), Some(1));
@@ -1270,7 +1360,7 @@ esac
         let fixture = RemoteJobFixture::new();
         let state_dir = fixture.state_dir();
         std::fs::create_dir_all(&state_dir).unwrap();
-        std::fs::write(state_dir.join("current"), "reboot-job\n").unwrap();
+        std::fs::write(state_dir.join("current"), "100-30\n").unwrap();
         let boot_id = std::fs::read_to_string("/proc/sys/kernel/random/boot_id").unwrap();
         std::fs::write(
             state_dir.join("state"),
@@ -1279,7 +1369,7 @@ esac
         .unwrap();
         std::fs::write(fixture.root.join("fake-tmux-session"), "").unwrap();
 
-        let result = fixture.controller("reboot-job", "exit 0");
+        let result = fixture.controller("100-30", "exit 0");
 
         assert_eq!(result.status.code(), Some(REMOTE_JOB_DETACHED));
         assert!(String::from_utf8_lossy(&result.stdout).contains("Attached to the remote update"));
@@ -1287,18 +1377,35 @@ esac
 
     #[cfg(unix)]
     #[test]
-    fn status_poll_does_not_attach_to_the_tmux_session() {
+    fn status_poll_does_not_start_a_missing_job() {
         let fixture = RemoteJobFixture::new();
-        let state_dir = fixture.state_dir();
-        std::fs::create_dir_all(&state_dir).unwrap();
-        std::fs::write(state_dir.join("current"), "active-job\n").unwrap();
-        std::fs::write(state_dir.join("state"), "running\n").unwrap();
-        std::fs::write(fixture.root.join("fake-tmux-session"), "").unwrap();
 
-        let result = fixture.controller_mode("active-job", "exit 0", "status");
+        let result = fixture.controller_mode("100-40", "exit 0", "status");
 
-        assert_eq!(result.status.code(), Some(REMOTE_JOB_RETRY));
-        assert!(!String::from_utf8_lossy(&result.stdout).contains("Attached"));
+        assert_eq!(result.status.code(), Some(REMOTE_JOB_NOT_STARTED));
+        assert!(!fixture.root.join("tmux-calls").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_old_request_cannot_run_again_after_a_newer_job() {
+        let fixture = RemoteJobFixture::new();
+        let count = fixture.root.join("count");
+
+        assert!(fixture
+            .controller("100-1", &format!("printf a >> '{}'", count.display()))
+            .status
+            .success());
+        assert!(fixture
+            .controller("100-2", &format!("printf b >> '{}'", count.display()))
+            .status
+            .success());
+        assert!(fixture
+            .controller("100-1", &format!("printf c >> '{}'", count.display()))
+            .status
+            .success());
+
+        assert_eq!(std::fs::read_to_string(count).unwrap(), "ab");
     }
 
     #[cfg(unix)]
@@ -1307,10 +1414,10 @@ esac
         let fixture = RemoteJobFixture::new();
         let state_dir = fixture.state_dir();
         std::fs::create_dir_all(&state_dir).unwrap();
-        std::fs::write(state_dir.join("current"), "reboot-job\n").unwrap();
+        std::fs::write(state_dir.join("current"), "100-50\n").unwrap();
         std::fs::write(state_dir.join("state"), "rebooting previous-boot\n").unwrap();
 
-        let result = fixture.controller("reboot-job", "exit 0");
+        let result = fixture.controller("100-50", "exit 0");
 
         assert!(result.status.success());
         assert_eq!(
@@ -1351,7 +1458,7 @@ test "$count" -gt 1 || exit 255
         let update = format!("printf x >> '{}'", count.display());
 
         let job = RemoteJob {
-            id: "retry-job".to_string(),
+            id: "100-60".to_string(),
             target: "test-host".to_string(),
             update_command: update,
             restart: false,
