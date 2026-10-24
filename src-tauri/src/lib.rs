@@ -20,6 +20,10 @@ pub struct AppState {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    if let Some(status) = terminal::run_remote_update_watcher_from_args() {
+        std::process::exit(status);
+    }
+
     #[cfg(target_os = "linux")]
     let dmabuf_workaround_enabled = linux_renderer::configure();
     #[cfg(not(target_os = "linux"))]
